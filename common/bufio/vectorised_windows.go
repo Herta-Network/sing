@@ -14,7 +14,7 @@ import (
 
 type syscallVectorisedWriterFields struct {
 	access    sync.Mutex
-	iovecList *[]windows.WSABuf
+	iovecList []windows.WSABuf
 	localAddr netip.AddrPort
 }
 
@@ -22,11 +22,7 @@ func (w *SyscallVectorisedWriter) WriteVectorised(buffers []*buf.Buffer) error {
 	w.access.Lock()
 	defer w.access.Unlock()
 	defer buf.ReleaseMulti(buffers)
-	var iovecList []windows.WSABuf
-	if w.iovecList != nil {
-		iovecList = *w.iovecList
-	}
-	iovecList = iovecList[:0]
+	iovecList := w.iovecList[:0]
 	for _, buffer := range buffers {
 		if buffer.IsEmpty() {
 			continue
@@ -36,10 +32,7 @@ func (w *SyscallVectorisedWriter) WriteVectorised(buffers []*buf.Buffer) error {
 	if len(iovecList) == 0 {
 		return os.ErrInvalid
 	}
-	if w.iovecList == nil {
-		w.iovecList = new([]windows.WSABuf)
-	}
-	*w.iovecList = iovecList // cache
+	w.iovecList = iovecList[:0]
 	var n uint32
 	var innerErr error
 	err := w.rawConn.Write(func(fd uintptr) (done bool) {
@@ -58,6 +51,7 @@ func (w *SyscallVectorisedWriter) WriteVectorised(buffers []*buf.Buffer) error {
 func (w *SyscallVectorisedPacketWriter) WriteVectorisedPacket(buffers []*buf.Buffer, destination M.Socksaddr) error {
 	w.access.Lock()
 	defer w.access.Unlock()
+	defer buf.ReleaseMulti(buffers)
 	if !w.localAddr.IsValid() {
 		err := control.Raw(w.rawConn, func(fd uintptr) error {
 			name, err := windows.Getsockname(windows.Handle(fd))
@@ -71,22 +65,14 @@ func (w *SyscallVectorisedPacketWriter) WriteVectorisedPacket(buffers []*buf.Buf
 			return err
 		}
 	}
-	defer buf.ReleaseMulti(buffers)
-	var iovecList []windows.WSABuf
-	if w.iovecList != nil {
-		iovecList = *w.iovecList
-	}
-	iovecList = iovecList[:0]
+	iovecList := w.iovecList[:0]
 	for _, buffer := range buffers {
 		if buffer.IsEmpty() {
 			continue
 		}
 		iovecList = append(iovecList, buffer.Iovec(buffer.Len()))
 	}
-	if w.iovecList == nil {
-		w.iovecList = new([]windows.WSABuf)
-	}
-	*w.iovecList = iovecList // cache
+	w.iovecList = iovecList[:0]
 	var n uint32
 	var innerErr error
 	err := w.rawConn.Write(func(fd uintptr) (done bool) {

@@ -242,3 +242,14 @@ func CastPacketWriter[T PacketWriter](writer PacketWriter) (T, bool) {
 	}
 	return common.DefaultValue[T](), false
 }
+
+// CloseHandlerFunc reports the completion of an asynchronous connection handler.
+type CloseHandlerFunc = func(error)
+
+type UDPHandlerEx interface {
+	NewPacketEx(buffer *buf.Buffer, destination M.Socksaddr)
+}
+
+type UDPConnectionHandlerEx interface {
+	NewPacketConnectionEx(ctx context.Context, conn PacketConn, source M.Socksaddr, destination M.Socksaddr, onClose CloseHandlerFunc)
+}

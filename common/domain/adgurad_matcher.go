@@ -43,9 +43,7 @@ func NewAdGuardMatcher(ruleLines []string) *AdGuardMatcher {
 			ruleLine = string(prefixLabel) + ruleLine
 		}
 		if !hasEnd {
-			if strings.HasSuffix(ruleLine, ".") {
-				ruleLine = ruleLine[:len(ruleLine)-1]
-			}
+			ruleLine = strings.TrimSuffix(ruleLine, ".")
 			ruleLine += string(suffixLabel)
 		}
 		ruleList = append(ruleList, reverseDomain(ruleLine))
@@ -68,24 +66,48 @@ func (m *AdGuardMatcher) Write(writer varbin.Writer) error {
 }
 
 func (m *AdGuardMatcher) Match(domain string) bool {
-	key := reverseDomain(domain)
-	if m.has([]byte(key), 0, 0) {
+	// A DNS name is at most 255 wire bytes, so ordinary matches stay on the
+	// stack. Keep a fallback for callers that use matcher syntax with longer
+	// strings even though those cannot be DNS names.
+	var inline [256]byte
+	var storage []byte
+	if len(domain)+1 <= len(inline) {
+		storage = inline[:len(domain)+1]
+	} else {
+		storage = make([]byte, len(domain)+1)
+	}
+	reverseDomainInto(storage[1:], domain)
+	start := 1
+	if m.has(storage[start:], 0, 0) {
 		return true
 	}
 	for {
-		if m.has([]byte(string(suffixLabel)+key), 0, 0) {
+		// Once a leading label has been discarded, its final byte is dead and can
+		// hold the virtual suffix marker without another concatenation.
+		storage[start-1] = suffixLabel
+		if m.has(storage[start-1:], 0, 0) {
 			return true
 		}
-		idx := strings.IndexByte(key, '.')
+		idx := bytes.IndexByte(storage[start:], '.')
 		if idx == -1 {
 			return false
 		}
-		key = key[idx+1:]
+		start += idx + 1
 	}
 }
 
 func (m *AdGuardMatcher) has(key []byte, nodeId, bmIdx int) bool {
-	for i := 0; i < len(key); i++ {
+	return m.hasWithDepth(key, nodeId, bmIdx, 0)
+}
+
+func (m *AdGuardMatcher) hasWithDepth(key []byte, nodeId, bmIdx int, depth int) bool {
+	const maxDepth = 100
+	if depth > maxDepth {
+		return false
+	}
+
+	keyLen := len(key)
+	for i := 0; i < keyLen; i++ {
 		currentChar := key[i]
 		for ; ; bmIdx++ {
 			if getBit(m.set.labelBitmap, bmIdx) != 0 {
@@ -105,18 +127,18 @@ func (m *AdGuardMatcher) has(key []byte, nodeId, bmIdx int) bool {
 			if nextLabel == currentChar {
 				break
 			}
-			if nextLabel == anyLabel {
-				idx := bytes.IndexRune(key[i:], '.')
+			if nextLabel == anyLabel || nextLabel == suffixLabel {
 				nextNodeId := countZeros(m.set.labelBitmap, m.set.ranks, bmIdx+1)
-				if idx == -1 {
-					if getBit(m.set.leaves, nextNodeId) != 0 {
+				nextBmIdx := selectIthOne(m.set.labelBitmap, m.set.ranks, m.set.selects, nextNodeId-1) + 1
+
+				if m.hasWithDepth(key[i:], nextNodeId, nextBmIdx, depth+1) {
+					return true
+				}
+
+				for j := i + 1; j <= keyLen; j++ {
+					if m.hasWithDepth(key[j:], nextNodeId, nextBmIdx, depth+1) {
 						return true
 					}
-					idx = 0
-				}
-				nextBmIdx := selectIthOne(m.set.labelBitmap, m.set.ranks, m.set.selects, nextNodeId-1) + 1
-				if m.has(key[i+idx:], nextNodeId, nextBmIdx) {
-					return true
 				}
 			}
 		}
@@ -131,8 +153,13 @@ func (m *AdGuardMatcher) has(key []byte, nodeId, bmIdx int) bool {
 			return false
 		}
 		nextLabel := m.set.labels[bmIdx-nodeId]
-		if nextLabel == prefixLabel || nextLabel == rootLabel {
+		if nextLabel == prefixLabel || nextLabel == rootLabel || nextLabel == suffixLabel {
 			return true
+		}
+		if nextLabel == anyLabel {
+			nextNodeId := countZeros(m.set.labelBitmap, m.set.ranks, bmIdx+1)
+			nextBmIdx := selectIthOne(m.set.labelBitmap, m.set.ranks, m.set.selects, nextNodeId-1) + 1
+			return m.hasWithDepth([]byte{}, nextNodeId, nextBmIdx, depth+1)
 		}
 	}
 }
@@ -145,12 +172,13 @@ func (m *AdGuardMatcher) Dump() (ruleLines []string) {
 			hasStart bool
 			hasEnd   bool
 		)
-		if key[0] == prefixLabel {
+		switch key[0] {
+		case prefixLabel:
 			key = key[1:]
-		} else if key[0] == rootLabel {
+		case rootLabel:
 			key = key[1:]
 			isSuffix = true
-		} else {
+		default:
 			hasStart = true
 		}
 		if key[len(key)-1] == suffixLabel {

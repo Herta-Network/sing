@@ -3,6 +3,7 @@ package domain_test
 import (
 	"bytes"
 	"encoding/binary"
+	"strings"
 	"testing"
 
 	"github.com/metacubex/sing/common/domain"
@@ -16,6 +17,30 @@ type succinctSetData struct {
 	Leaves      []uint64
 	LabelBitmap []uint64
 	Labels      []byte
+}
+
+func TestReadMatcherRejectsMalformedSuccinctSet(t *testing.T) {
+	var encoded bytes.Buffer
+	require.NoError(t, encoded.WriteByte(0))
+	_, err := varbin.WriteUvarint(&encoded, 0)
+	require.NoError(t, err)
+	_, err = varbin.WriteUvarint(&encoded, 1)
+	require.NoError(t, err)
+	require.NoError(t, binary.Write(&encoded, binary.BigEndian, uint64(1)))
+	_, err = varbin.WriteUvarint(&encoded, 1)
+	require.NoError(t, err)
+	require.NoError(t, encoded.WriteByte('x'))
+
+	_, err = domain.ReadMatcher(&encoded)
+	require.ErrorContains(t, err, "malformed succinct set")
+}
+
+func TestMatcherDumpDeepDomain(t *testing.T) {
+	deepDomain := strings.Repeat("a", 16*1024)
+	matcher := domain.NewMatcher([]string{deepDomain}, nil, false)
+	domains, suffixes := matcher.Dump()
+	require.Equal(t, []string{deepDomain}, domains)
+	require.Empty(t, suffixes)
 }
 
 func legacyReadSuccinctSetData(data []byte) (succinctSetData, error) {

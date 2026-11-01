@@ -52,3 +52,21 @@ func TestReadWaitOptionsDoesNotLimitDatagrams(t *testing.T) {
 		t.Fatal("stream buffer limit truncated datagram capacity")
 	}
 }
+
+func TestStreamGrowthAndDatagramHeadroom(t *testing.T) {
+	normal := (ReadWaitOptions{MTU: 65535}).NewBuffer()
+	if normal.Cap() != buf.BufferSize {
+		t.Fatal("stream grew without policy")
+	}
+	normal.Release()
+	grown := (ReadWaitOptions{IncreaseBuffer: true, MaxBufferSize: 48000}).NewBuffer()
+	if grown.Cap() != 48000 {
+		t.Fatalf("grown cap=%d", grown.Cap())
+	}
+	grown.Release()
+	packet := (ReadWaitOptions{FrontHeadroom: buf.UDPBufferSize + 1, RearHeadroom: 32}).NewPacketBuffer()
+	if packet.FreeLen() != 1 {
+		t.Fatal("packet headroom must preserve payload space")
+	}
+	packet.Release()
+}

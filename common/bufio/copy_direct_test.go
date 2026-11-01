@@ -53,7 +53,9 @@ func TestCopyWaitUDP(t *testing.T) {
 	readWaiter, created := CreatePacketReadWaiter(NewPacketConn(outputConn))
 	require.True(t, created)
 	require.NotNil(t, readWaiter)
-	readWaiter.InitializeReadWaiter(N.ReadWaitOptions{})
+	// UDPTest sends 9000-byte datagrams, including under with_low_memory where
+	// the default buffer is smaller. Declare the test's actual packet MTU.
+	readWaiter.InitializeReadWaiter(N.ReadWaitOptions{MTU: 9000})
 	require.NoError(t, UDPTest(t, inputConn, &packetReadWaitWrapper{
 		PacketConn: outputConn,
 		readWaiter: readWaiter,

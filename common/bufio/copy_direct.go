@@ -6,11 +6,25 @@ import (
 	"syscall"
 
 	"github.com/metacubex/sing/common/buf"
-	M "github.com/metacubex/sing/common/metadata"
 	N "github.com/metacubex/sing/common/network"
 )
 
+const maxSpliceSize = 1 << 20
+
+func resolveTransferSize(hook TransferSizeHook) int {
+	if hook != nil {
+		if size := hook(); size > 0 && size < maxSpliceSize {
+			return size
+		}
+	}
+	return maxSpliceSize
+}
+
 func copyDirect(source syscall.Conn, destination syscall.Conn, readCounters []N.CountFunc, writeCounters []N.CountFunc) (handed bool, n int64, err error) {
+	return copyDirectWithOptions(source, destination, readCounters, writeCounters, CopyOptions{})
+}
+
+func copyDirectWithOptions(source syscall.Conn, destination syscall.Conn, readCounters []N.CountFunc, writeCounters []N.CountFunc, options CopyOptions) (handed bool, n int64, err error) {
 	rawSource, err := source.SyscallConn()
 	if err != nil {
 		return
@@ -19,7 +33,7 @@ func copyDirect(source syscall.Conn, destination syscall.Conn, readCounters []N.
 	if err != nil {
 		return
 	}
-	handed, n, err = splice(rawSource, rawDestination, readCounters, writeCounters)
+	handed, n, err = splice(rawSource, rawDestination, readCounters, writeCounters, options.BeforeTransfer, options.TransferSize)
 	return
 }
 
@@ -40,37 +54,6 @@ func copyWaitWithPool(originSource io.Reader, destination N.ExtendedWriter, sour
 		}
 		dataLen := buffer.Len()
 		err = destination.WriteBuffer(buffer)
-		if err != nil {
-			buffer.Leak()
-			if !notFirstTime {
-				err = N.ReportHandshakeFailure(originSource, err)
-			}
-			return
-		}
-		n += int64(dataLen)
-		for _, counter := range readCounters {
-			counter(int64(dataLen))
-		}
-		for _, counter := range writeCounters {
-			counter(int64(dataLen))
-		}
-		notFirstTime = true
-	}
-}
-
-func copyPacketWaitWithPool(originSource N.PacketReader, destinationConn N.PacketWriter, source N.PacketReadWaiter, readCounters []N.CountFunc, writeCounters []N.CountFunc, notFirstTime bool) (handled bool, n int64, err error) {
-	handled = true
-	var (
-		buffer      *buf.Buffer
-		destination M.Socksaddr
-	)
-	for {
-		buffer, destination, err = source.WaitReadPacket()
-		if err != nil {
-			return
-		}
-		dataLen := buffer.Len()
-		err = destinationConn.WritePacket(buffer, destination)
 		if err != nil {
 			buffer.Leak()
 			if !notFirstTime {

@@ -31,6 +31,8 @@ func (w *AssociatePacketReadWaiter) InitializeReadWaiter(options N.ReadWaitOptio
 func (w *AssociatePacketReadWaiter) WaitReadPacket() (buffer *buf.Buffer, destination M.Socksaddr, err error) {
 	buffer, err = w.readWaiter.WaitReadBuffer()
 	if err != nil {
+		buffer.Release()
+		buffer = nil
 		return
 	}
 	if buffer.Len() < 3 {
@@ -38,11 +40,18 @@ func (w *AssociatePacketReadWaiter) WaitReadPacket() (buffer *buf.Buffer, destin
 		return nil, M.Socksaddr{}, ErrInvalidPacket
 	}
 	buffer.Advance(3)
-	destination, err = M.SocksaddrSerializer.ReadAddrPort(buffer)
+	destination, err = M.SocksaddrSerializer.ReadAddrPortBuffer(buffer)
 	if err != nil {
 		buffer.Release()
+		buffer = nil
 		return
 	}
-	w.conn.remoteAddr = destination
+	w.conn.setRemoteAddr(destination)
 	return
+}
+
+func (w *AssociatePacketReadWaiter) ReleaseReadWaiter() {
+	if releaser, ok := w.readWaiter.(N.ReadWaiterReleaser); ok {
+		releaser.ReleaseReadWaiter()
+	}
 }

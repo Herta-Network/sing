@@ -10,9 +10,10 @@ type ReadWaitable interface {
 }
 
 type ReadWaitOptions struct {
-	FrontHeadroom int
-	RearHeadroom  int
-	MTU           int
+	FrontHeadroom  int
+	RearHeadroom   int
+	MTU            int
+	IncreaseBuffer bool
 	// MaxBufferSize applies to new stream buffers, not packet buffers. Required
 	// headroom plus one payload byte takes precedence over a smaller limit.
 	MaxBufferSize int
@@ -45,42 +46,65 @@ func (o ReadWaitOptions) Copy(buffer *buf.Buffer) *buf.Buffer {
 }
 
 func (o ReadWaitOptions) NewBuffer() *buf.Buffer {
-	if o.MaxBufferSize > 0 {
-		size := buf.BufferSize
+	bufferSize := buf.BufferSize
+	if o.IncreaseBuffer {
 		if o.MTU > 0 {
-			size = o.MTU + o.FrontHeadroom + o.RearHeadroom
+			bufferSize = o.MTU + o.FrontHeadroom + o.RearHeadroom
+		} else {
+			bufferSize = 65535
 		}
-		if size > o.MaxBufferSize {
-			size = o.MaxBufferSize
+		if bufferSize > buf.MaxPooledBufferSize {
+			bufferSize = buf.MaxPooledBufferSize
 		}
-		minimum := o.FrontHeadroom + o.RearHeadroom + 1
-		if size < minimum {
-			size = minimum
+	} else if o.MTU > 0 {
+		mtuBufferSize := o.MTU + o.FrontHeadroom + o.RearHeadroom
+		if mtuBufferSize < bufferSize {
+			bufferSize = mtuBufferSize
 		}
-		buffer := buf.NewSize(size)
-		buffer.Resize(o.FrontHeadroom, 0)
-		buffer.Reserve(o.RearHeadroom)
-		return buffer
 	}
-	return o.newBuffer(buf.BufferSize, true)
-}
-
-func (o ReadWaitOptions) NewPacketBuffer() *buf.Buffer {
-	return o.newBuffer(buf.UDPBufferSize, true)
-}
-
-func (o ReadWaitOptions) newBuffer(defaultBufferSize int, reserve bool) *buf.Buffer {
-	var bufferSize int
-	if o.MTU > 0 {
-		bufferSize = o.MTU + o.FrontHeadroom + o.RearHeadroom
-	} else {
-		bufferSize = defaultBufferSize
+	if o.MaxBufferSize > 0 && bufferSize > o.MaxBufferSize {
+		bufferSize = o.MaxBufferSize
+	}
+	minimumBufferSize := o.FrontHeadroom + o.RearHeadroom + 1
+	if bufferSize < minimumBufferSize {
+		bufferSize = minimumBufferSize
 	}
 	buffer := buf.NewSize(bufferSize)
 	if o.FrontHeadroom > 0 {
 		buffer.Resize(o.FrontHeadroom, 0)
 	}
-	if o.RearHeadroom > 0 && reserve {
+	if o.RearHeadroom > 0 {
+		buffer.Reserve(o.RearHeadroom)
+	}
+	return buffer
+}
+
+func (o ReadWaitOptions) NewPacketBuffer() *buf.Buffer {
+	bufferSize := buf.UDPBufferSize
+	if o.MTU > 0 {
+		bufferSize = o.MTU + o.FrontHeadroom + o.RearHeadroom
+	}
+	minimumBufferSize := o.FrontHeadroom + o.RearHeadroom + 1
+	if bufferSize < minimumBufferSize {
+		bufferSize = minimumBufferSize
+	}
+	buffer := buf.NewSize(bufferSize)
+	if o.FrontHeadroom > 0 {
+		buffer.Resize(o.FrontHeadroom, 0)
+	}
+	if o.RearHeadroom > 0 {
+		buffer.Reserve(o.RearHeadroom)
+	}
+	return buffer
+}
+
+func (o ReadWaitOptions) NewBufferSize(bufferSize int) *buf.Buffer {
+	bufferSize += o.FrontHeadroom + o.RearHeadroom
+	buffer := buf.NewSize(bufferSize)
+	if o.FrontHeadroom > 0 {
+		buffer.Resize(o.FrontHeadroom, 0)
+	}
+	if o.RearHeadroom > 0 {
 		buffer.Reserve(o.RearHeadroom)
 	}
 	return buffer
@@ -126,4 +150,29 @@ type PacketReadWaiter interface {
 
 type PacketReadWaitCreator interface {
 	CreateReadWaiter() (PacketReadWaiter, bool)
+}
+
+type PacketBatchReadWaiter interface {
+	ReadWaitable
+	// Returned slices are borrowed until the next read, initialization or
+	// release. Buffer ownership transfers to the caller.
+	WaitReadPackets() ([]*buf.Buffer, []M.Socksaddr, error)
+}
+
+type PacketBatchReadWaitCreator interface {
+	CreatePacketBatchReadWaiter() (PacketBatchReadWaiter, bool)
+}
+
+type ConnectedPacketBatchReadWaiter interface {
+	ReadWaitable
+	WaitReadConnectedPackets() ([]*buf.Buffer, M.Socksaddr, error)
+}
+
+type ConnectedPacketBatchReadWaitCreator interface {
+	CreateConnectedPacketBatchReadWaiter() (ConnectedPacketBatchReadWaiter, bool)
+}
+
+type VectorisedPacketReadWaiter = PacketBatchReadWaiter
+type VectorisedPacketReadWaitCreator interface {
+	CreateVectorisedPacketReadWaiter() (PacketBatchReadWaiter, bool)
 }

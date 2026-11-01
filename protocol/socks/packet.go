@@ -2,7 +2,9 @@ package socks
 
 import (
 	"bytes"
+	"io"
 	"net"
+	"sync"
 
 	"github.com/metacubex/sing/common"
 	"github.com/metacubex/sing/common/buf"
@@ -22,9 +24,10 @@ var ErrInvalidPacket = E.New("socks5: invalid packet")
 
 type AssociatePacketConn struct {
 	N.AbstractConn
-	conn       N.ExtendedConn
-	remoteAddr M.Socksaddr
-	underlying net.Conn
+	conn         N.ExtendedConn
+	remoteAddr   M.Socksaddr
+	remoteAccess sync.RWMutex
+	underlying   net.Conn
 }
 
 func NewAssociatePacketConn(conn net.Conn, remoteAddr M.Socksaddr, underlying net.Conn) *AssociatePacketConn {
@@ -49,7 +52,7 @@ func (c *AssociatePacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err erro
 	if err != nil {
 		return
 	}
-	c.remoteAddr = destination
+	c.setRemoteAddr(destination)
 	addr = destination.UDPAddr()
 	index := 3 + int(reader.Size()) - reader.Len()
 	n = copy(p, p[index:n])
@@ -61,7 +64,7 @@ func (c *AssociatePacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error
 	buffer := buf.NewSize(3 + M.SocksaddrSerializer.AddrPortLen(destination) + len(p))
 	defer buffer.Release()
 	common.Must(buffer.WriteZeroN(3))
-	err = M.SocksaddrSerializer.WriteAddrPort(buffer, destination)
+	err = M.SocksaddrSerializer.WriteAddrPortBuffer(buffer, destination)
 	if err != nil {
 		return
 	}
@@ -69,7 +72,14 @@ func (c *AssociatePacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error
 	if err != nil {
 		return
 	}
-	return c.conn.Write(buffer.Bytes())
+	written, err := c.conn.Write(buffer.Bytes())
+	if err == nil && written != buffer.Len() {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }
 
 func (c *AssociatePacketConn) ReadPacket(buffer *buf.Buffer) (destination M.Socksaddr, err error) {
@@ -81,19 +91,20 @@ func (c *AssociatePacketConn) ReadPacket(buffer *buf.Buffer) (destination M.Sock
 		return M.Socksaddr{}, ErrInvalidPacket
 	}
 	buffer.Advance(3)
-	destination, err = M.SocksaddrSerializer.ReadAddrPort(buffer)
+	destination, err = M.SocksaddrSerializer.ReadAddrPortBuffer(buffer)
 	if err != nil {
 		return
 	}
-	c.remoteAddr = destination
+	c.setRemoteAddr(destination)
 	return destination.Unwrap(), nil
 }
 
 func (c *AssociatePacketConn) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
 	header := buf.With(buffer.ExtendHeader(3 + M.SocksaddrSerializer.AddrPortLen(destination)))
 	common.Must(header.WriteZeroN(3))
-	err := M.SocksaddrSerializer.WriteAddrPort(header, destination)
+	err := M.SocksaddrSerializer.WriteAddrPortBuffer(header, destination)
 	if err != nil {
+		buffer.Release()
 		return err
 	}
 	return c.conn.WriteBuffer(buffer)
@@ -105,11 +116,11 @@ func (c *AssociatePacketConn) Read(b []byte) (n int, err error) {
 }
 
 func (c *AssociatePacketConn) Write(b []byte) (n int, err error) {
-	return c.WriteTo(b, c.remoteAddr)
+	return c.WriteTo(b, c.getRemoteAddr())
 }
 
 func (c *AssociatePacketConn) RemoteAddr() net.Addr {
-	return c.remoteAddr.UDPAddr()
+	return c.getRemoteAddr().UDPAddr()
 }
 
 func (c *AssociatePacketConn) Upstream() any {
@@ -125,4 +136,15 @@ func (c *AssociatePacketConn) Close() error {
 		c.conn,
 		c.underlying,
 	)
+}
+
+func (c *AssociatePacketConn) setRemoteAddr(addr M.Socksaddr) {
+	c.remoteAccess.Lock()
+	c.remoteAddr = addr
+	c.remoteAccess.Unlock()
+}
+func (c *AssociatePacketConn) getRemoteAddr() M.Socksaddr {
+	c.remoteAccess.RLock()
+	defer c.remoteAccess.RUnlock()
+	return c.remoteAddr
 }

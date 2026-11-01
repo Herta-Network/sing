@@ -115,12 +115,18 @@ func (w *syscallPacketReadWaiter) InitializeReadWaiter(options N.ReadWaitOptions
 	w.readFunc = func(fd uintptr) (done bool) {
 		buffer := w.options.NewPacketBuffer()
 		var readN int
+		var flags int
 		var from syscall.Sockaddr
-		readN, _, _, from, w.readErr = syscall.Recvmsg(int(fd), buffer.FreeBytes(), nil, 0)
+		readN, _, flags, from, w.readErr = syscall.Recvmsg(int(fd), buffer.FreeBytes(), nil, 0)
 		//goland:noinspection GoDirectComparisonOfErrors
 		if w.readErr != nil {
 			buffer.Release()
 			return w.readErr != syscall.EAGAIN
+		}
+		if flags&syscall.MSG_TRUNC != 0 || readN > buffer.FreeLen() {
+			buffer.Release()
+			w.readErr = io.ErrShortBuffer
+			return true
 		}
 		if readN > 0 {
 			buffer.Truncate(readN)

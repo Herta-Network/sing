@@ -14,7 +14,9 @@ func CopyExtendedOnce(destination io.Writer, source io.Reader, readCounters []N.
 
 func copyExtendedOnceWithOptions(destination io.Writer, source io.Reader, readCounters []N.CountFunc, writeCounters []N.CountFunc, policy CopyOptions) (n int64, err error) {
 	options := N.NewReadWaitOptions(source, destination)
-	options.MaxBufferSize = policy.readOptions().MaxBufferSize
+	readPolicy := policy.readOptions()
+	options.MaxBufferSize = readPolicy.MaxBufferSize
+	options.IncreaseBuffer = readPolicy.IncreaseBuffer
 	var buffer *buf.Buffer
 	calledWaitRead := false
 	if readWaiter, isReadWaiter := CreateReadWaiter(source); isReadWaiter {

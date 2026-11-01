@@ -12,7 +12,10 @@ import (
 // CopyReadOptions controls the next stream read. BatchSize <= 1 selects a
 // single-buffer read; larger batches are capped at MaxReadBatchSize.
 type CopyReadOptions struct {
-	BatchSize int
+	// IncreaseBuffer allows a stream buffer up to its MTU or 65535 bytes,
+	// still bounded by MaxBufferSize and the pool ceiling.
+	IncreaseBuffer bool
+	BatchSize      int
 	// MaxBufferSize bounds the requested size of each new stream buffer,
 	// including headroom. Zero retains the normal buffer size. Required
 	// headroom plus one payload byte is always reserved. Pools may round the
@@ -23,6 +26,10 @@ type CopyReadOptions struct {
 type CopyReadPolicy func() CopyReadOptions
 type TransferHook func(int64) error
 
+// TransferSizeHook caps the next direct (splice) read. Nonpositive values use
+// the normal cap; values above 1 MiB are clamped to 1 MiB.
+type TransferSizeHook func() int
+
 // CopyOptions is consumed synchronously by CopyWithOptions. ReadPolicy is
 // evaluated between reads, and again before publishing a batch. BeforeTransfer
 // may reject a write; the copy engine then releases the buffers it still owns.
@@ -30,6 +37,7 @@ type TransferHook func(int64) error
 type CopyOptions struct {
 	ReadPolicy     CopyReadPolicy
 	BeforeTransfer TransferHook
+	TransferSize   TransferSizeHook
 	WriteCounters  []N.CountFunc
 }
 
@@ -70,8 +78,8 @@ func releaseReadWaiter(waiter any) {
 }
 
 // copyControlled keeps the existing protocol/handshake wrappers intact. A
-// controlled transfer deliberately bypasses splice, whose current API cannot
-// enforce a per-read policy or a pre-write admission hook.
+// per-read buffer policy uses this path; splice independently supports
+// BeforeTransfer and TransferSize when no ReadPolicy is configured.
 func copyControlled(originSource io.Reader, destination N.ExtendedWriter, source N.ExtendedReader,
 	readCounters, writeCounters []N.CountFunc, options CopyOptions, hasTransferred bool,
 ) (n int64, err error) {
@@ -121,6 +129,7 @@ func copyControlled(originSource io.Reader, destination N.ExtendedWriter, source
 		policy := options.readOptions()
 		requested := base
 		requested.MaxBufferSize = policy.MaxBufferSize
+		requested.IncreaseBuffer = policy.IncreaseBuffer
 		requested.BatchSize = policy.BatchSize
 		if policy.BatchSize > 1 && !checkedVector {
 			vectorReader, hasVectorReader = CreateVectorisedReadWaiter(source)

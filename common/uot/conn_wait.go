@@ -1,8 +1,6 @@
 package uot
 
 import (
-	"encoding/binary"
-
 	"github.com/metacubex/sing/common/buf"
 	E "github.com/metacubex/sing/common/exceptions"
 	M "github.com/metacubex/sing/common/metadata"
@@ -10,26 +8,30 @@ import (
 )
 
 func (c *Conn) InitializeReadWaiter(options N.ReadWaitOptions) (needCopy bool) {
+	c.readAccess.Lock()
+	defer c.readAccess.Unlock()
 	c.readWaitOptions = options
 	return false
 }
 
 func (c *Conn) WaitReadPacket() (buffer *buf.Buffer, destination M.Socksaddr, err error) {
+	c.readAccess.Lock()
+	defer c.readAccess.Unlock()
 	if c.isConnect {
 		destination = c.destination
 	} else {
-		destination, err = AddrParser.ReadAddrPort(c.Conn)
+		destination, err = AddrParser.ReadAddrPortWithScratch(c.Conn, c.readBuffer[:])
 		if err != nil {
 			return
 		}
 	}
-	var length uint16
-	err = binary.Read(c.Conn, binary.BigEndian, &length)
+	var length int
+	length, err = c.readLength()
 	if err != nil {
 		return
 	}
-	buffer = c.readWaitOptions.NewPacketBuffer()
-	_, err = buffer.ReadFullFrom(c.Conn, int(length))
+	buffer = c.readWaitOptions.NewBufferSize(length)
+	_, err = buffer.ReadFullFrom(c.Conn, length)
 	if err != nil {
 		buffer.Release()
 		return nil, M.Socksaddr{}, E.Cause(err, "UoT read")

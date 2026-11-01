@@ -51,13 +51,19 @@ func (w *testPacketWriter) Close() error {
 
 func testConn(writer N.PacketWriter) *conn {
 	ctx, cancel := common.ContextWithCancelCause(context.Background())
-	return &conn{ctx: ctx, cancel: cancel, data: make(chan packet, 64), source: writer, readDeadline: pipe.MakeDeadline()}
+	return &conn{ctx: ctx, cancel: cancel, data: make(chan *N.PacketBuffer, 64), source: writer, readDeadline: pipe.MakeDeadline()}
 }
 
 func testBuffer(size int) *buf.Buffer {
 	buffer := buf.NewSize(size)
 	buffer.Extend(size)
 	return buffer
+}
+
+func testQueuedPacket(buffer *buf.Buffer) *N.PacketBuffer {
+	packet := N.NewPacketBuffer()
+	packet.Buffer = buffer
+	return packet
 }
 
 func TestServiceFullQueueDoesNotBlock(t *testing.T) {
@@ -82,7 +88,7 @@ func TestServiceFullQueueDoesNotBlock(t *testing.T) {
 		<-handlerDone
 		// Also clean up payloads when running against the unfixed implementation.
 		for len(c.data) > 0 {
-			(<-c.data).data.Release()
+			releasePacket(<-c.data)
 		}
 	}()
 
@@ -99,7 +105,7 @@ func TestServiceFullQueueDoesNotBlock(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		// Unblock the old producer so this regression does not itself leak it.
-		(<-c.data).data.Release()
+		releasePacket(<-c.data)
 		<-returned
 		t.Error("full UDP session queue blocked the producer")
 	}
@@ -110,7 +116,7 @@ func TestConnCloseReleasesQueuedPackets(t *testing.T) {
 	c := testConn(writer)
 	buffers := []*buf.Buffer{testBuffer(128), testBuffer(1024)}
 	for _, buffer := range buffers {
-		c.data <- packet{data: buffer}
+		c.data <- testQueuedPacket(buffer)
 	}
 	if err := c.Close(); err != nil {
 		t.Fatal(err)
@@ -166,7 +172,7 @@ func TestWaitReadPacketPreservesLargePayloadWithHeadroom(t *testing.T) {
 	input := testBuffer(len(payload))
 	copy(input.Bytes(), payload)
 	defer input.Release()
-	c.data <- packet{data: input}
+	c.data <- testQueuedPacket(input)
 	c.InitializeReadWaiter(N.ReadWaitOptions{FrontHeadroom: 8, RearHeadroom: 16})
 	output, _, err := c.WaitReadPacket()
 	if err != nil {
@@ -191,7 +197,7 @@ func TestOldHandlerDoesNotRemoveReplacement(t *testing.T) {
 		return nil
 	}})
 	defer s.Close()
-	s.nat.Store(1, oldConn)
+	s.nat.shard(1).Store(1, oldConn)
 	done := make(chan struct{})
 	go func() {
 		s.handleConnection(context.Background(), 1, oldConn, M.Metadata{})
@@ -199,10 +205,10 @@ func TestOldHandlerDoesNotRemoveReplacement(t *testing.T) {
 	}()
 	<-entered
 	oldConn.Close()
-	s.nat.Store(1, newConn)
+	s.nat.shard(1).Store(1, newConn)
 	close(finish)
 	<-done
-	current, found := s.nat.Load(1)
+	current, found := s.nat.shard(1).Load(1)
 	if !found || current != newConn || newWriter.closes.Load() != 0 {
 		t.Fatal("old handler cleanup removed or closed its replacement")
 	}
@@ -240,9 +246,9 @@ func TestServiceCloseDuringInitialization(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("source initialization did not finish after service close")
 	}
-	if handled.Load() != 0 || writer.closes.Load() != 1 || buffer.RawCap() != 0 || s.nat.Exist(1) {
+	if handled.Load() != 0 || writer.closes.Load() != 1 || buffer.RawCap() != 0 || s.nat.shard(1).Exist(1) {
 		t.Fatalf("shutdown retained resources: handled=%d source_closes=%d buffer_cap=%d cached=%v",
-			handled.Load(), writer.closes.Load(), buffer.RawCap(), s.nat.Exist(1))
+			handled.Load(), writer.closes.Load(), buffer.RawCap(), s.nat.shard(1).Exist(1))
 	}
 	later := testBuffer(128)
 	s.NewPacket(context.Background(), 2, later, M.Metadata{}, func(N.PacketConn) N.PacketWriter {
@@ -299,7 +305,7 @@ func TestConnConcurrentEnqueueAndClose(t *testing.T) {
 		go func() {
 			defer group.Done()
 			<-start
-			if !c.enqueue(packet{data: buffer}) {
+			if !c.enqueue(testQueuedPacket(buffer)) {
 				buffer.Release()
 			}
 		}()
@@ -328,9 +334,9 @@ func TestServiceEvictionCloseCanReenter(t *testing.T) {
 		s.Close()
 		return nil
 	}
-	s.nat.Store(1, c)
+	s.nat.shard(1).Store(1, c)
 	done := make(chan struct{})
-	go func() { s.nat.Delete(1); close(done) }()
+	go func() { s.nat.shard(1).Delete(1); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(time.Second):
@@ -349,11 +355,11 @@ func TestCanceledPacketLookupPreservesExistingSession(t *testing.T) {
 	defer c.Close()
 	s := New[int](60, testHandler{handle: func(context.Context, N.PacketConn, M.Metadata) error { return nil }})
 	// Cancel exactly during lookup, after admission's initial context check.
-	s.nat = cache.New(cache.WithHealthCheck[int, *conn](func(int, *conn) bool {
+	s.nat.shards[s.nat.hasher.Hash32(1)&s.nat.mask] = cache.New(cache.WithHealthCheck[int, *conn](func(int, *conn) bool {
 		cancel()
 		return true
 	}))
-	s.nat.Store(1, c)
+	s.nat.shard(1).Store(1, c)
 	buffer := testBuffer(128)
 	s.NewPacket(ctx, 1, buffer, M.Metadata{}, func(N.PacketConn) N.PacketWriter {
 		t.Error("existing session was unexpectedly replaced")
@@ -362,7 +368,7 @@ func TestCanceledPacketLookupPreservesExistingSession(t *testing.T) {
 	if buffer.RawCap() != 0 {
 		t.Fatal("canceled packet retained its buffer")
 	}
-	if common.Done(c.ctx) || writer.closes.Load() != 0 || !s.nat.Exist(1) {
+	if common.Done(c.ctx) || writer.closes.Load() != 0 || !s.nat.shard(1).Exist(1) {
 		t.Fatal("one canceled packet destroyed the existing shared session")
 	}
 }

@@ -6,6 +6,10 @@ import (
 	N "github.com/metacubex/sing/common/network"
 )
 
+func (w *bindPacketReadWaiter) ReleaseReadWaiter()   { releaseReadWaiter(w.readWaiter) }
+func (w *unbindPacketReadWaiter) ReleaseReadWaiter() { releaseReadWaiter(w.readWaiter) }
+func (w *serverPacketReadWaiter) ReleaseReadWaiter() { releaseReadWaiter(w.readWaiter) }
+
 var _ N.ReadWaiter = (*bindPacketReadWaiter)(nil)
 
 type bindPacketReadWaiter struct {

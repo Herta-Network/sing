@@ -57,7 +57,7 @@ func EncodeRequest(request Request) (*buf.Buffer, error) {
 	bufferLen += M.SocksaddrSerializer.AddrPortLen(request.Destination)
 	buffer := buf.NewSize(bufferLen)
 	common.Must(binary.Write(buffer, binary.BigEndian, request.IsConnect))
-	err := M.SocksaddrSerializer.WriteAddrPort(buffer, request.Destination)
+	err := M.SocksaddrSerializer.WriteAddrPortBuffer(buffer, request.Destination)
 	if err != nil {
 		buffer.Release()
 		return nil, err

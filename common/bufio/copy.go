@@ -10,7 +10,6 @@ import (
 	"github.com/metacubex/sing/common"
 	"github.com/metacubex/sing/common/buf"
 	E "github.com/metacubex/sing/common/exceptions"
-	M "github.com/metacubex/sing/common/metadata"
 	N "github.com/metacubex/sing/common/network"
 	"github.com/metacubex/sing/common/task"
 )
@@ -86,9 +85,9 @@ func CopyWithOptions(destination io.Writer, source io.Reader, options CopyOption
 		}
 		srcSyscallConn, srcIsSyscall := source.(syscall.Conn)
 		dstSyscallConn, dstIsSyscall := destination.(syscall.Conn)
-		if srcIsSyscall && dstIsSyscall && !options.controlled() {
+		if srcIsSyscall && dstIsSyscall && options.ReadPolicy == nil {
 			var handled bool
-			handled, _n, err = copyDirect(srcSyscallConn, dstSyscallConn, readCounters, writeCounters)
+			handled, _n, err = copyDirectWithOptions(srcSyscallConn, dstSyscallConn, readCounters, writeCounters, options)
 			if handled {
 				n += _n
 				return
@@ -250,127 +249,5 @@ func CopyConn(ctx context.Context, source net.Conn, destination net.Conn) error 
 	group.Cleanup(func() {
 		common.Close(source, destination)
 	})
-	return group.Run(ctx)
-}
-
-func CopyPacket(destinationConn N.PacketWriter, source N.PacketReader) (n int64, err error) {
-	var readCounters, writeCounters []N.CountFunc
-	var cachedPackets []*N.PacketBuffer
-	originSource := source
-	for {
-		source, readCounters = N.UnwrapCountPacketReader(source, readCounters)
-		destinationConn, writeCounters = N.UnwrapCountPacketWriter(destinationConn, writeCounters)
-		if cachedReader, isCached := source.(N.CachedPacketReader); isCached {
-			packet := cachedReader.ReadCachedPacket()
-			if packet != nil {
-				cachedPackets = append(cachedPackets, packet)
-				continue
-			}
-		}
-		break
-	}
-	if cachedPackets != nil {
-		n, err = WritePacketWithPool(originSource, destinationConn, cachedPackets, readCounters, writeCounters)
-		if err != nil {
-			return
-		}
-	}
-	copeN, err := CopyPacketWithCounters(destinationConn, source, originSource, readCounters, writeCounters)
-	n += copeN
-	return
-}
-
-func CopyPacketWithCounters(destinationConn N.PacketWriter, source N.PacketReader, originSource N.PacketReader, readCounters []N.CountFunc, writeCounters []N.CountFunc) (n int64, err error) {
-	var (
-		handled bool
-		copeN   int64
-	)
-	readWaiter, isReadWaiter := CreatePacketReadWaiter(source)
-	if isReadWaiter {
-		defer releaseReadWaiter(readWaiter)
-		needCopy := readWaiter.InitializeReadWaiter(N.NewReadWaitOptions(source, destinationConn))
-		if !needCopy || common.LowMemory {
-			handled, copeN, err = copyPacketWaitWithPool(originSource, destinationConn, readWaiter, readCounters, writeCounters, n > 0)
-			if handled {
-				n += copeN
-				return
-			}
-		}
-	}
-	copeN, err = CopyPacketWithPool(originSource, destinationConn, source, readCounters, writeCounters, n > 0)
-	n += copeN
-	return
-}
-
-func CopyPacketWithPool(originSource N.PacketReader, destination N.PacketWriter, source N.PacketReader, readCounters []N.CountFunc, writeCounters []N.CountFunc, notFirstTime bool) (n int64, err error) {
-	options := N.NewReadWaitOptions(source, destination)
-	var destinationAddress M.Socksaddr
-	for {
-		buffer := options.NewPacketBuffer()
-		destinationAddress, err = source.ReadPacket(buffer)
-		if err != nil {
-			buffer.Release()
-			return
-		}
-		dataLen := buffer.Len()
-		options.PostReturn(buffer)
-		err = destination.WritePacket(buffer, destinationAddress)
-		if err != nil {
-			buffer.Leak()
-			if !notFirstTime {
-				err = N.ReportHandshakeFailure(originSource, err)
-			}
-			return
-		}
-		for _, counter := range readCounters {
-			counter(int64(dataLen))
-		}
-		for _, counter := range writeCounters {
-			counter(int64(dataLen))
-		}
-		n += int64(dataLen)
-		notFirstTime = true
-	}
-}
-
-func WritePacketWithPool(originSource N.PacketReader, destination N.PacketWriter, packetBuffers []*N.PacketBuffer, readCounters []N.CountFunc, writeCounters []N.CountFunc) (n int64, err error) {
-	options := N.NewReadWaitOptions(nil, destination)
-	var notFirstTime bool
-	for _, packetBuffer := range packetBuffers {
-		buffer := options.Copy(packetBuffer.Buffer)
-		dataLen := buffer.Len()
-		err = destination.WritePacket(buffer, packetBuffer.Destination)
-		N.PutPacketBuffer(packetBuffer)
-		if err != nil {
-			buffer.Leak()
-			if !notFirstTime {
-				err = N.ReportHandshakeFailure(originSource, err)
-			}
-			return
-		}
-		for _, counter := range readCounters {
-			counter(int64(dataLen))
-		}
-		for _, counter := range writeCounters {
-			counter(int64(dataLen))
-		}
-		n += int64(dataLen)
-		notFirstTime = true
-	}
-	return
-}
-
-func CopyPacketConn(ctx context.Context, source N.PacketConn, destination N.PacketConn) error {
-	var group task.Group
-	group.Append("upload", func(ctx context.Context) error {
-		return common.Error(CopyPacket(destination, source))
-	})
-	group.Append("download", func(ctx context.Context) error {
-		return common.Error(CopyPacket(source, destination))
-	})
-	group.Cleanup(func() {
-		common.Close(source, destination)
-	})
-	group.FastFail()
 	return group.Run(ctx)
 }

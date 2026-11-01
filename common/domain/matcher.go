@@ -45,6 +45,13 @@ func NewMatcher(domains []string, domainSuffix []string, generateLegacy bool) *M
 		domainList = append(domainList, reverseDomain(domain))
 	}
 	sort.Strings(domainList)
+	unique := domainList[:0]
+	for _, domain := range domainList {
+		if len(unique) == 0 || unique[len(unique)-1] != domain {
+			unique = append(unique, domain)
+		}
+	}
+	domainList = unique
 	return &Matcher{newSuccinctSet(domainList)}
 }
 
@@ -109,11 +116,12 @@ func (m *Matcher) Dump() (domainList []string, prefixList []string) {
 	prefixMap := make(map[string]bool)
 	for _, key := range m.set.keys() {
 		key = reverseDomain(key)
-		if key[0] == prefixLabel {
+		switch key[0] {
+		case prefixLabel:
 			prefixMap[key[1:]] = true
-		} else if key[0] == rootLabel {
+		case rootLabel:
 			prefixList = append(prefixList, key[1:])
-		} else {
+		default:
 			domainMap[key] = true
 		}
 	}
@@ -138,10 +146,15 @@ func (m *Matcher) Dump() (domainList []string, prefixList []string) {
 func reverseDomain(domain string) string {
 	l := len(domain)
 	b := make([]byte, l)
+	reverseDomainInto(b, domain)
+	return string(b)
+}
+
+func reverseDomainInto(destination []byte, domain string) {
+	l := len(domain)
 	for i := 0; i < l; {
 		r, n := utf8.DecodeRuneInString(domain[i:])
 		i += n
-		utf8.EncodeRune(b[l-i:], r)
+		utf8.EncodeRune(destination[l-i:], r)
 	}
-	return string(b)
 }

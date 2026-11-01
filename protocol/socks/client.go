@@ -2,6 +2,7 @@ package socks
 
 import (
 	"context"
+	"github.com/metacubex/sing/common"
 	"net"
 	"net/url"
 	"os"
@@ -99,7 +100,7 @@ func NewClientFromURL(dialer N.Dialer, rawURL string) (*Client, error) {
 	return &client, nil
 }
 
-func (c *Client) DialContext(ctx context.Context, network string, address M.Socksaddr) (net.Conn, error) {
+func (c *Client) DialContext(ctx context.Context, network string, address M.Socksaddr) (result net.Conn, err error) {
 	network = N.NetworkName(network)
 	var command byte
 	switch network {
@@ -117,6 +118,13 @@ func (c *Client) DialContext(ctx context.Context, network string, address M.Sock
 	if err != nil {
 		return nil, err
 	}
+	stopHandshake := watchHandshakeContext(ctx, tcpConn)
+	defer func() {
+		if contextErr := stopHandshake(); contextErr != nil {
+			common.Close(result, tcpConn)
+			result, err = nil, contextErr
+		}
+	}()
 	if c.version == Version4 && address.IsFqdn() {
 		tcpAddr, err := net.ResolveTCPAddr(network, address.String())
 		if err != nil {
@@ -161,11 +169,18 @@ func (c *Client) ListenPacket(ctx context.Context, destination M.Socksaddr) (net
 	return conn.(*AssociatePacketConn), nil
 }
 
-func (c *Client) BindContext(ctx context.Context, address M.Socksaddr) (net.Conn, error) {
+func (c *Client) BindContext(ctx context.Context, address M.Socksaddr) (result net.Conn, err error) {
 	tcpConn, err := c.dialer.DialContext(ctx, N.NetworkTCP, c.serverAddr)
 	if err != nil {
 		return nil, err
 	}
+	stopHandshake := watchHandshakeContext(ctx, tcpConn)
+	defer func() {
+		if contextErr := stopHandshake(); contextErr != nil {
+			common.Close(result, tcpConn)
+			result, err = nil, contextErr
+		}
+	}()
 	switch c.version {
 	case Version4, Version4A:
 		_, err = ClientHandshake4(tcpConn, socks4.CommandBind, address, c.username)
@@ -184,4 +199,23 @@ func (c *Client) BindContext(ctx context.Context, address M.Socksaddr) (net.Conn
 	}
 	_ = tcpConn.Close()
 	return nil, os.ErrInvalid
+}
+
+// The watcher is joined before returning a live connection, so a later caller
+// cancellation cannot close an already completed handshake. This also works on
+// the minimum supported Go version, before context.AfterFunc was introduced.
+func watchHandshakeContext(ctx context.Context, conn net.Conn) func() error {
+	if ctx.Done() == nil {
+		return func() error { return nil }
+	}
+	done, exited := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(exited)
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
+	return func() error { close(done); <-exited; return ctx.Err() }
 }

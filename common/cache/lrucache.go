@@ -191,6 +191,14 @@ func (c *LruCache[K, V]) Exist(key K) bool {
 	return ok
 }
 
+// Len reports the number of retained entries, including entries whose lazy
+// expiration has not yet been observed by a cache operation.
+func (c *LruCache[K, V]) Len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.cache)
+}
+
 func (c *LruCache[K, V]) Store(key K, value V) {
 	expires := int64(0)
 	if c.maxAge > 0 {

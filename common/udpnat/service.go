@@ -11,7 +11,6 @@ import (
 
 	"github.com/metacubex/sing/common"
 	"github.com/metacubex/sing/common/buf"
-	"github.com/metacubex/sing/common/cache"
 	E "github.com/metacubex/sing/common/exceptions"
 	M "github.com/metacubex/sing/common/metadata"
 	N "github.com/metacubex/sing/common/network"
@@ -24,20 +23,27 @@ type Handler interface {
 }
 
 type Service[K comparable] struct {
-	nat     *cache.LruCache[K, *conn]
+	nat     *sessionCache[K]
 	handler Handler
 	closed  atomic.Bool
 }
 
+const defaultMaxSessions = 64 * 1024
+
+// ServiceOptions bounds the retained UDP sessions. Zero or negative values
+// select the default of 65536 sessions. Shards have independent LRU eviction.
+type ServiceOptions struct{ MaxSessions int }
+
 func New[K comparable](maxAge int64, handler Handler) *Service[K] {
+	return NewWithOptions[K](maxAge, handler, ServiceOptions{})
+}
+
+func NewWithOptions[K comparable](maxAge int64, handler Handler, options ServiceOptions) *Service[K] {
+	if options.MaxSessions <= 0 {
+		options.MaxSessions = defaultMaxSessions
+	}
 	return &Service[K]{
-		nat: cache.New(
-			cache.WithAge[K, *conn](maxAge),
-			cache.WithUpdateAgeOnGet[K, *conn](),
-			cache.WithEvict[K, *conn](func(key K, conn *conn) {
-				conn.Close()
-			}),
-		),
+		nat:     newSessionCache[K](maxAge, options.MaxSessions),
 		handler: handler,
 	}
 }
@@ -73,14 +79,16 @@ func (s *Service[T]) NewPacket(ctx context.Context, key T, buffer *buf.Buffer, m
 // NewContextPacket consumes buffer. Packets arriving at a full session queue
 // are dropped and released so one slow session cannot block the receive loop.
 func (s *Service[T]) NewContextPacket(ctx context.Context, key T, buffer *buf.Buffer, metadata M.Metadata, init func(natConn N.PacketConn) (context.Context, N.PacketWriter)) {
+	queued := N.NewPacketBuffer()
+	*queued = N.PacketBuffer{Buffer: buffer, Destination: metadata.Destination}
 	for {
 		if s.closed.Load() || common.Done(ctx) {
-			buffer.Release()
+			releasePacket(queued)
 			return
 		}
 		c, loaded := s.nat.LoadOrStore(key, func() *conn {
 			c := &conn{
-				data:         make(chan packet, 64),
+				data:         make(chan *N.PacketBuffer, 64),
 				localAddr:    metadata.Source,
 				remoteAddr:   metadata.Destination,
 				readDeadline: pipe.MakeDeadline(),
@@ -94,7 +102,7 @@ func (s *Service[T]) NewContextPacket(ctx context.Context, key T, buffer *buf.Bu
 			if s.closed.Load() || !loaded {
 				s.deleteConnection(key, c)
 			}
-			buffer.Release()
+			releasePacket(queued)
 			return
 		}
 		handlerContext := ctx
@@ -103,7 +111,7 @@ func (s *Service[T]) NewContextPacket(ctx context.Context, key T, buffer *buf.Bu
 			handlerContext, source = init(c)
 			if !c.initializeSource(source) || s.closed.Load() || common.Done(handlerContext) {
 				s.deleteConnection(key, c)
-				buffer.Release()
+				releasePacket(queued)
 				return
 			}
 		} else {
@@ -111,7 +119,7 @@ func (s *Service[T]) NewContextPacket(ctx context.Context, key T, buffer *buf.Bu
 			c.localAddr = metadata.Source
 			c.stateAccess.Unlock()
 		}
-		if c.enqueue(packet{data: buffer, destination: metadata.Destination}) {
+		if c.enqueue(queued) {
 			if !loaded {
 				// Publish the first packet before a handler can reject/close the
 				// session, rather than retrying that packet into another session.
@@ -122,7 +130,7 @@ func (s *Service[T]) NewContextPacket(ctx context.Context, key T, buffer *buf.Bu
 		// A closed session may be replaced while its old handler is still exiting.
 		s.deleteConnection(key, c)
 		if !loaded {
-			buffer.Release()
+			releasePacket(queued)
 			return
 		}
 	}
@@ -137,7 +145,7 @@ func (s *Service[T]) handleConnection(ctx context.Context, key T, c *conn, metad
 
 func (s *Service[T]) deleteConnection(key T, c *conn) {
 	c.Close()
-	s.nat.DeleteFunc(key, func(current *conn) bool { return current == c })
+	s.nat.Delete(key, c)
 }
 
 // Close releases cached sessions and rejects later packets. Handler callbacks
@@ -149,25 +157,26 @@ func (s *Service[T]) Close() error {
 	return nil
 }
 
-type packet struct {
-	data        *buf.Buffer
-	destination M.Socksaddr
-}
+// Len reports retained session count across all shards.
+func (s *Service[T]) Len() int { return s.nat.Len() }
 
 var _ N.PacketConn = (*conn)(nil)
 
 type conn struct {
 	ctx             context.Context
 	cancel          common.ContextCancelCauseFunc
-	data            chan packet
+	data            chan *N.PacketBuffer
 	localAddr       M.Socksaddr
 	remoteAddr      M.Socksaddr
 	stateAccess     sync.RWMutex
 	closed          bool
 	closeErr        error
 	source          N.PacketWriter
+	batchWriter     N.PacketBatchWriter
 	readDeadline    pipe.Deadline
 	readWaitOptions N.ReadWaitOptions
+	batchBuffers    []*buf.Buffer
+	batchAddresses  []M.Socksaddr
 }
 
 func (c *conn) ReadPacket(buffer *buf.Buffer) (addr M.Socksaddr, err error) {
@@ -175,26 +184,27 @@ func (c *conn) ReadPacket(buffer *buf.Buffer) (addr M.Socksaddr, err error) {
 	if err != nil {
 		return M.Socksaddr{}, err
 	}
-	_, err = buffer.ReadOnceFrom(p.data)
-	p.data.Release()
-	return p.destination, err
+	_, err = buffer.Write(p.Buffer.Bytes())
+	destination := p.Destination
+	releasePacket(p)
+	return destination, err
 }
 
-func (c *conn) readPacket() (packet, error) {
+func (c *conn) readPacket() (*N.PacketBuffer, error) {
 	if common.Done(c.ctx) {
-		return packet{}, io.ErrClosedPipe
+		return nil, io.ErrClosedPipe
 	}
 	select {
 	case p := <-c.data:
 		if common.Done(c.ctx) {
-			p.data.Release()
-			return packet{}, io.ErrClosedPipe
+			releasePacket(p)
+			return nil, io.ErrClosedPipe
 		}
 		return p, nil
 	case <-c.ctx.Done():
-		return packet{}, io.ErrClosedPipe
+		return nil, io.ErrClosedPipe
 	case <-c.readDeadline.Wait():
-		return packet{}, os.ErrDeadlineExceeded
+		return nil, os.ErrDeadlineExceeded
 	}
 }
 
@@ -222,10 +232,11 @@ func (c *conn) Close() error {
 	c.cancel(net.ErrClosed)
 	source := c.source
 	c.source = nil
+	c.batchWriter = nil
 	for {
 		select {
 		case p := <-c.data:
-			p.data.Release()
+			releasePacket(p)
 		default:
 			c.stateAccess.Unlock()
 			// A source close hook may reenter the NAT/cache or this connection.
@@ -252,7 +263,7 @@ func (c *conn) initializeSource(source N.PacketWriter) bool {
 
 // enqueue transfers ownership on success, including when a full queue drops
 // the packet. A closed connection leaves ownership with the caller for retry.
-func (c *conn) enqueue(p packet) bool {
+func (c *conn) enqueue(p *N.PacketBuffer) bool {
 	c.stateAccess.RLock()
 	if c.closed || common.Done(c.ctx) {
 		c.stateAccess.RUnlock()
@@ -264,9 +275,14 @@ func (c *conn) enqueue(p packet) bool {
 		return true
 	default:
 		c.stateAccess.RUnlock()
-		p.data.Release()
+		releasePacket(p)
 		return true
 	}
+}
+
+func releasePacket(packet *N.PacketBuffer) {
+	packet.Buffer.Release()
+	N.PutPacketBuffer(packet)
 }
 
 func (c *conn) LocalAddr() net.Addr {

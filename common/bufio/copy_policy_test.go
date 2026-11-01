@@ -184,7 +184,7 @@ func TestCopyPolicySwitchesBatchAndBufferLimits(t *testing.T) {
 	if writer.batches == 0 || len(reader.initialized) != 4 {
 		t.Fatalf("batch path or policy transitions missing: batches=%d options=%+v", writer.batches, reader.initialized)
 	}
-	for index, want := range []CopyReadOptions{{1, 128}, {4, 256}, {2, 64}, {1, 128}} {
+	for index, want := range []CopyReadOptions{{BatchSize: 1, MaxBufferSize: 128}, {BatchSize: 4, MaxBufferSize: 256}, {BatchSize: 2, MaxBufferSize: 64}, {BatchSize: 1, MaxBufferSize: 128}} {
 		got := reader.initialized[index]
 		if got.BatchSize != want.BatchSize || got.MaxBufferSize != want.MaxBufferSize {
 			t.Fatalf("read policy %d = %+v, want %+v", index, got, want)

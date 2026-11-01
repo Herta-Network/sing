@@ -31,10 +31,11 @@ func NewVectorisedAssociateConn(conn net.Conn, writer N.VectorisedWriter, remote
 
 func (c *VectorisedAssociatePacketConn) WriteVectorisedPacket(buffers []*buf.Buffer, destination M.Socksaddr) error {
 	header := buf.NewSize(3 + M.SocksaddrSerializer.AddrPortLen(destination))
-	defer header.Release()
 	common.Must(header.WriteZeroN(3))
-	err := M.SocksaddrSerializer.WriteAddrPort(header, destination)
+	err := M.SocksaddrSerializer.WriteAddrPortBuffer(header, destination)
 	if err != nil {
+		header.Release()
+		buf.ReleaseMulti(buffers)
 		return err
 	}
 	return c.VectorisedPacketWriter.WriteVectorisedPacket(append([]*buf.Buffer{header}, buffers...), destination)

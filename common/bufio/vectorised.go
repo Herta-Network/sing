@@ -4,6 +4,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"runtime"
 	"syscall"
 
 	"github.com/metacubex/sing/common"
@@ -13,31 +14,50 @@ import (
 )
 
 func NewVectorisedWriter(writer io.Writer) N.VectorisedWriter {
-	if vectorisedWriter, ok := CreateVectorisedWriter(N.UnwrapWriter(writer)); ok {
+	if vectorisedWriter, ok := CreateVectorisedWriter(writer); ok {
 		return vectorisedWriter
 	}
 	return &BufferedVectorisedWriter{upstream: writer}
 }
 
 func CreateVectorisedWriter(writer any) (N.VectorisedWriter, bool) {
-	switch w := writer.(type) {
-	case N.VectorisedWriter:
-		return w, true
-	case *net.TCPConn:
-		return &NetVectorisedWriterWrapper{w}, true
-	case *net.UDPConn:
-		return &NetVectorisedWriterWrapper{w}, true
-	case *net.IPConn:
-		return &NetVectorisedWriterWrapper{w}, true
-	case *net.UnixConn:
-		return &NetVectorisedWriterWrapper{w}, true
-	case syscall.Conn:
-		rawConn, err := w.SyscallConn()
-		if err == nil {
-			return &SyscallVectorisedWriter{upstream: writer, rawConn: rawConn}, true
+	if vectorisedCreator, isVectorisedCreator := writer.(N.VectorisedWriteCreator); isVectorisedCreator {
+		return vectorisedCreator.CreateVectorisedWriter()
+	}
+	if runtime.GOOS == "windows" {
+		switch conn := writer.(type) {
+		case N.VectorisedWriter:
+			return conn, true
+		case *net.TCPConn:
+			return &NetVectorisedWriterWrapper{conn}, true
+		case *net.UDPConn:
+			return &NetVectorisedWriterWrapper{conn}, true
+		case *net.IPConn:
+			return &NetVectorisedWriterWrapper{conn}, true
+		case *net.UnixConn:
+			return &NetVectorisedWriterWrapper{conn}, true
 		}
-	case syscall.RawConn:
-		return &SyscallVectorisedWriter{upstream: writer, rawConn: w}, true
+	} else {
+		switch conn := writer.(type) {
+		case N.VectorisedWriter:
+			return conn, true
+		case syscall.Conn:
+			rawConn, err := conn.SyscallConn()
+			if err != nil {
+				return nil, false
+			}
+			return &SyscallVectorisedWriter{upstream: writer, rawConn: rawConn}, true
+		case syscall.RawConn:
+			return &SyscallVectorisedWriter{upstream: writer, rawConn: conn}, true
+		}
+	}
+	if u, ok := writer.(N.WriterWithUpstream); ok && u.WriterReplaceable() {
+		if u, ok := writer.(N.WithUpstreamWriter); ok {
+			return CreateVectorisedWriter(u.UpstreamWriter())
+		}
+		if u, ok := writer.(common.WithUpstream); ok {
+			return CreateVectorisedWriter(u.Upstream())
+		}
 	}
 	return nil, false
 }
@@ -67,9 +87,9 @@ func (w *BufferedVectorisedWriter) WriteVectorised(buffers []*buf.Buffer) error 
 	defer buf.ReleaseMulti(buffers)
 	bufferLen := buf.LenMulti(buffers)
 	if bufferLen == 0 {
-		return common.Error(w.upstream.Write(nil))
+		return writeVectorBytes(w.upstream, nil)
 	} else if len(buffers) == 1 {
-		return common.Error(w.upstream.Write(buffers[0].Bytes()))
+		return writeVectorBytes(w.upstream, buffers[0].Bytes())
 	}
 	var bufferBytes []byte
 	if bufferLen > 65535 {
@@ -80,7 +100,15 @@ func (w *BufferedVectorisedWriter) WriteVectorised(buffers []*buf.Buffer) error 
 		bufferBytes = buffer.FreeBytes()
 	}
 	buf.CopyMulti(bufferBytes, buffers)
-	return common.Error(w.upstream.Write(bufferBytes))
+	return writeVectorBytes(w.upstream, bufferBytes)
+}
+
+func writeVectorBytes(writer io.Writer, data []byte) error {
+	n, err := writer.Write(data)
+	if err == nil && n != len(data) {
+		return io.ErrShortWrite
+	}
+	return err
 }
 
 func (w *BufferedVectorisedWriter) Upstream() any {
