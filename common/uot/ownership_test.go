@@ -196,7 +196,7 @@ func TestConnConcurrentBatchesAndScratchBounds(t *testing.T) {
 	if len(seen) != workers*packets {
 		t.Fatal("lost batch frames")
 	}
-	if cap(c.batchHeaders) > bufio.MaxReadBatchSize || cap(c.batchVectors) > 2*bufio.MaxReadBatchSize {
+	if cap(c.batchVectors) > 2*bufio.MaxReadBatchSize {
 		t.Fatal("scratch capacity grew with entire caller batch")
 	}
 	for _, buffer := range c.batchVectors[:cap(c.batchVectors)] {

@@ -32,7 +32,6 @@ type Conn struct {
 	writeErr        error
 	writeAccess     sync.Mutex
 	writeVectors    [2]*buf.Buffer
-	batchHeaders    []*buf.Buffer
 	batchVectors    []*buf.Buffer
 }
 
@@ -173,6 +172,46 @@ func (c *Conn) ReadPacket(buffer *buf.Buffer) (destination M.Socksaddr, err erro
 	return
 }
 
+// FrontHeadroom lets owned-buffer relays reserve space before reading payloads.
+func (c *Conn) FrontHeadroom() int {
+	if c.isConnect {
+		return 2
+	}
+	return 2 + 1 + 1 + 255 + 2 // length, family, domain length, domain, port
+}
+
+func (c *Conn) preparePacket(buffer *buf.Buffer, destination M.Socksaddr) (*buf.Buffer, error) {
+	if buffer == nil {
+		return nil, os.ErrInvalid
+	}
+	length := buffer.Len()
+	if length > int(^uint16(0)) {
+		buffer.Release()
+		return nil, E.New("UoT payload too large: ", length)
+	}
+	headerLen := 2
+	if !c.isConnect {
+		headerLen += AddrParser.AddrPortLen(destination)
+	}
+	buffer = (N.ReadWaitOptions{FrontHeadroom: headerLen}).Copy(buffer)
+	header := buf.With(buffer.ExtendHeader(headerLen))
+	if err := c.writeHeader(header, length, destination); err != nil {
+		buffer.Release()
+		return nil, err
+	}
+	return buffer, nil
+}
+
+func (c *Conn) writeHeader(header *buf.Buffer, length int, destination M.Socksaddr) error {
+	if !c.isConnect {
+		if err := AddrParser.WriteAddrPortBuffer(header, destination); err != nil {
+			return err
+		}
+	}
+	binary.BigEndian.PutUint16(header.Extend(2), uint16(length))
+	return nil
+}
+
 func (c *Conn) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
 	c.writeAccess.Lock()
 	defer c.writeAccess.Unlock()
@@ -180,48 +219,16 @@ func (c *Conn) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
 		buffer.Release()
 		return c.writeErr
 	}
-	if buffer.Len() > int(^uint16(0)) {
-		length := buffer.Len()
-		buffer.Release()
-		return E.New("UoT payload too large: ", length)
-	}
-
-	var headerLen int
-	if !c.isConnect {
-		headerLen += AddrParser.AddrPortLen(destination)
-	}
-	headerLen += 2
-	if c.writer == nil {
-		headerLen += buffer.Len()
-	}
-	header := buf.NewSize(headerLen)
-	ownedHeader := true
-	defer func() {
-		if ownedHeader {
-			header.Release()
-		}
-	}()
-	if !c.isConnect {
-		err := AddrParser.WriteAddrPortBuffer(header, destination)
-		if err != nil {
-			buffer.Release()
-			return err
-		}
-	}
-	common.Must(writeLength(header, buffer.Len()))
-	if c.writer == nil {
-		common.Must1(header.Write(buffer.Bytes()))
-		buffer.Release()
-		return c.writeAllFrame(header.Bytes())
-	}
-	c.writeVectors[0] = header
-	c.writeVectors[1] = buffer
-	ownedHeader = false
-	err := c.writer.WriteVectorised(c.writeVectors[:])
-	clearBuffers(c.writeVectors[:])
+	frame, err := c.preparePacket(buffer, destination)
 	if err != nil {
-		header.Leak()
-		buffer.Leak()
+		return err
+	}
+	total := int64(frame.Len())
+	c.writeVectors[0] = frame
+	n, err := c.countedWriter.WriteVectorisedCount(c.writeVectors[:1])
+	c.writeVectors[0] = nil
+	if n < 0 || n > total || (n != total && err == nil) {
+		err = io.ErrShortWrite
 	}
 	return c.finishWrite(err)
 }
@@ -267,11 +274,7 @@ func (c *Conn) WritePacketBatchCount(buffers []*buf.Buffer, destinations []M.Soc
 }
 
 func (c *Conn) writePacketBatchCountLocked(buffers []*buf.Buffer, destinations []M.Socksaddr) (int, error) {
-	c.batchHeaders = c.batchHeaders[:0]
 	c.batchVectors = c.batchVectors[:0]
-	if cap(c.batchHeaders) < len(buffers) {
-		c.batchHeaders = make([]*buf.Buffer, 0, len(buffers))
-	}
 	if cap(c.batchVectors) < 2*len(buffers) {
 		c.batchVectors = make([]*buf.Buffer, 0, 2*len(buffers))
 	}
@@ -281,34 +284,36 @@ func (c *Conn) writePacketBatchCountLocked(buffers []*buf.Buffer, destinations [
 	owned := true
 	defer func() {
 		if owned {
-			buf.ReleaseMulti(c.batchHeaders)
-			buf.ReleaseMulti(buffers)
+			buf.ReleaseMulti(c.batchVectors)
 		}
-		clearBuffers(c.batchHeaders)
 		clearBuffers(c.batchVectors)
-		c.batchHeaders = c.batchHeaders[:0]
 		c.batchVectors = c.batchVectors[:0]
 	}()
 	for index, buffer := range buffers {
-		if buffer.Len() > int(^uint16(0)) {
-			return 0, E.New("UoT payload too large: ", buffer.Len())
-		}
 		headerLen := 2
 		if !c.isConnect {
 			headerLen += AddrParser.AddrPortLen(destinations[index])
 		}
-		header := buf.NewSize(headerLen)
-		c.batchHeaders = append(c.batchHeaders, header)
-		if !c.isConnect {
-			if err := AddrParser.WriteAddrPortBuffer(header, destinations[index]); err != nil {
+		// Without reserved headroom, keep header and payload separate. Joining
+		// an opaque transport's vectors then copies each payload only once.
+		if buffer != nil && buffer.Len() <= 65535 && buffer.Start() < headerLen {
+			header := buf.NewSize(headerLen)
+			if err := c.writeHeader(header, buffer.Len(), destinations[index]); err != nil {
+				header.Release()
+				buf.ReleaseMulti(buffers[index:])
 				return 0, err
 			}
+			c.batchVectors = append(c.batchVectors, header, buffer)
+			total += int64(header.Len() + buffer.Len())
+		} else {
+			frame, err := c.preparePacket(buffer, destinations[index])
+			if err != nil {
+				buf.ReleaseMulti(buffers[index+1:])
+				return 0, err
+			}
+			c.batchVectors = append(c.batchVectors, frame)
+			total += int64(frame.Len())
 		}
-		if err := writeLength(header, buffer.Len()); err != nil {
-			return 0, err
-		}
-		c.batchVectors = append(c.batchVectors, header, buffer)
-		total += int64(header.Len() + buffer.Len())
 		frameEnds[index] = total
 	}
 	owned = false
@@ -332,14 +337,6 @@ func clearBuffers(buffers []*buf.Buffer) {
 	for index := range buffers {
 		buffers[index] = nil
 	}
-}
-
-func (c *Conn) writeAllFrame(frame []byte) error {
-	n, err := c.Conn.Write(frame)
-	if err == nil && n != len(frame) {
-		err = io.ErrShortWrite
-	}
-	return c.finishWrite(err)
 }
 
 // A failed stream write may have published a partial frame. Retrying another

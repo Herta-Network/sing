@@ -86,10 +86,11 @@ func BenchmarkConnWritePacket(b *testing.B) {
 	})
 	b.Run("optimized", func(b *testing.B) {
 		b.ReportAllocs()
-		conn := &Conn{isConnect: true, writer: writer}
+		conn := NewConn(&discardPacketStream{}, Request{IsConnect: true})
 		for index := 0; index < b.N; index++ {
-			payload := buf.NewSize(1)
-			payload.Extend(1)[0] = 1
+			payload := buf.NewSize(3)
+			payload.Resize(2, 1)
+			payload.Bytes()[0] = 1
 			if err := conn.WritePacket(payload, destination); err != nil {
 				b.Fatal(err)
 			}
