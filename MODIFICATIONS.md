@@ -80,3 +80,23 @@ Validation runs on macOS arm64 unless explicitly labeled otherwise:
 Full-repository vet still reports the pre-existing `common/cond.go:177`
 `unsafe.Pointer` diagnostic. There is no Linux runtime, iOS-device RSS/throughput
 measurement, or production deployment proof from these local checks.
+
+## Batch write progress
+
+The optional `PacketBatchWriterWithCount` and connected equivalent preserve the
+old error-only APIs while returning a completed packet prefix on both success
+and failure. Native mmsg/msg_x writers retain progress across short sends,
+poll waits, timeouts and socket closure. Every input buffer is consumed,
+including unsent tails; the result does not authorize retrying freed buffers.
+
+Counted vector writes retain `net.Buffers` for standard stream sockets and join
+buffers for other `io.Writer` implementations without bypassing protocol
+wrappers. UoT maps accepted bytes to complete frames, excludes its lazy request
+header, and closes/poisons the stream after partial-frame failure. Counter and
+NAT adapters retain prefix accounting and address translation; empty datagrams
+count as packets. CopyPacket uses scalar writes for opaque error-only batch
+writers instead of guessing partial progress.
+
+Regression coverage includes native partial-send/poll-error injection,
+zero-length datagrams, scalar fallback, NAT translation, counter prefixes,
+every UoT frame boundary, lazy-header failures and once-only buffer release.

@@ -507,3 +507,18 @@ func testBuffersBytes(values ...[]byte) []*buf.Buffer {
 	}
 	return buffers
 }
+
+func (w *testPacketBatchWriter) WritePacketBatchCount(buffers []*buf.Buffer, destinations []M.Socksaddr) (int, error) {
+	err := w.WritePacketBatch(buffers, destinations)
+	if err != nil {
+		return 0, err
+	}
+	return len(buffers), nil
+}
+func (w *testConnectedPacketBatchWriter) WriteConnectedPacketBatchCount(buffers []*buf.Buffer) (int, error) {
+	err := w.WriteConnectedPacketBatch(buffers)
+	if err != nil {
+		return 0, err
+	}
+	return len(buffers), nil
+}

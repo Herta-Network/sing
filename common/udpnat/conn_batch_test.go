@@ -49,3 +49,17 @@ func TestConnCachedBatchWriterRejectsAfterClose(t *testing.T) {
 		t.Fatal("rejected batch retained payload")
 	}
 }
+
+func TestConnCountedWriterRejectsAfterClose(t *testing.T) {
+	c := testConn(&testPacketWriter{})
+	writer, ok := c.CreatePacketBatchWriterWithCount()
+	if !ok {
+		t.Fatal("count writer unavailable")
+	}
+	c.Close()
+	buffer := testBuffer(128)
+	n, err := writer.WritePacketBatchCount([]*buf.Buffer{buffer}, []M.Socksaddr{{}})
+	if n != 0 || err != io.ErrClosedPipe || buffer.RawCap() != 0 {
+		t.Fatalf("n=%d err=%v cap=%d", n, err, buffer.RawCap())
+	}
+}

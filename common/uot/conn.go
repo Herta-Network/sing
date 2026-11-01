@@ -25,6 +25,7 @@ type Conn struct {
 	isConnect       bool
 	destination     M.Socksaddr
 	writer          N.VectorisedWriter
+	countedWriter   N.VectorisedWriterWithCount
 	readWaitOptions N.ReadWaitOptions
 	readBuffer      [16]byte
 	readAccess      sync.Mutex
@@ -42,6 +43,7 @@ func NewConn(conn net.Conn, request Request) *Conn {
 		destination: request.Destination,
 	}
 	uConn.writer, _ = bufio.CreateVectorisedWriter(N.UnwrapWriter(conn))
+	uConn.countedWriter = bufio.NewVectorisedWriterWithCount(conn)
 	return uConn
 }
 
@@ -228,32 +230,43 @@ func (c *Conn) CreatePacketBatchWriter() (N.PacketBatchWriter, bool) {
 	return c, true
 }
 
+func (c *Conn) CreatePacketBatchWriterWithCount() (N.PacketBatchWriterWithCount, bool) {
+	return c, true
+}
+
 func (c *Conn) WritePacketBatch(buffers []*buf.Buffer, destinations []M.Socksaddr) error {
+	_, err := c.WritePacketBatchCount(buffers, destinations)
+	return err
+}
+
+func (c *Conn) WritePacketBatchCount(buffers []*buf.Buffer, destinations []M.Socksaddr) (written int, err error) {
 	c.writeAccess.Lock()
 	defer c.writeAccess.Unlock()
 	if c.writeErr != nil {
 		buf.ReleaseMulti(buffers)
-		return c.writeErr
+		return 0, c.writeErr
 	}
 	if len(buffers) == 0 || len(buffers) != len(destinations) {
 		buf.ReleaseMulti(buffers)
-		return os.ErrInvalid
+		return 0, os.ErrInvalid
 	}
 	for start := 0; start < len(buffers); {
 		end := start + bufio.MaxReadBatchSize
 		if end > len(buffers) {
 			end = len(buffers)
 		}
-		if err := c.writePacketBatchLocked(buffers[start:end], destinations[start:end]); err != nil {
+		n, writeErr := c.writePacketBatchCountLocked(buffers[start:end], destinations[start:end])
+		written += n
+		if writeErr != nil {
 			buf.ReleaseMulti(buffers[end:])
-			return err
+			return written, writeErr
 		}
 		start = end
 	}
-	return nil
+	return written, nil
 }
 
-func (c *Conn) writePacketBatchLocked(buffers []*buf.Buffer, destinations []M.Socksaddr) error {
+func (c *Conn) writePacketBatchCountLocked(buffers []*buf.Buffer, destinations []M.Socksaddr) (int, error) {
 	c.batchHeaders = c.batchHeaders[:0]
 	c.batchVectors = c.batchVectors[:0]
 	if cap(c.batchHeaders) < len(buffers) {
@@ -262,6 +275,9 @@ func (c *Conn) writePacketBatchLocked(buffers []*buf.Buffer, destinations []M.So
 	if cap(c.batchVectors) < 2*len(buffers) {
 		c.batchVectors = make([]*buf.Buffer, 0, 2*len(buffers))
 	}
+	var inlineEnds [bufio.MaxReadBatchSize]int64
+	frameEnds := inlineEnds[:len(buffers)]
+	var total int64
 	owned := true
 	defer func() {
 		if owned {
@@ -275,7 +291,7 @@ func (c *Conn) writePacketBatchLocked(buffers []*buf.Buffer, destinations []M.So
 	}()
 	for index, buffer := range buffers {
 		if buffer.Len() > int(^uint16(0)) {
-			return E.New("UoT payload too large: ", buffer.Len())
+			return 0, E.New("UoT payload too large: ", buffer.Len())
 		}
 		headerLen := 2
 		if !c.isConnect {
@@ -285,26 +301,31 @@ func (c *Conn) writePacketBatchLocked(buffers []*buf.Buffer, destinations []M.So
 		c.batchHeaders = append(c.batchHeaders, header)
 		if !c.isConnect {
 			if err := AddrParser.WriteAddrPortBuffer(header, destinations[index]); err != nil {
-				return err
+				return 0, err
 			}
 		}
 		if err := writeLength(header, buffer.Len()); err != nil {
-			return err
+			return 0, err
 		}
 		c.batchVectors = append(c.batchVectors, header, buffer)
-	}
-	writer := c.writer
-	if writer == nil {
-		writer = bufio.NewVectorisedWriter(c.Conn)
+		total += int64(header.Len() + buffer.Len())
+		frameEnds[index] = total
 	}
 	owned = false
-	err := writer.WriteVectorised(c.batchVectors)
-	if err != nil {
-		for _, buffer := range c.batchVectors {
-			buffer.Leak()
-		}
+	n, err := c.countedWriter.WriteVectorisedCount(c.batchVectors)
+	if n < 0 || n > total {
+		n, err = 0, io.ErrShortWrite
+	} else if n != total && err == nil {
+		err = io.ErrShortWrite
 	}
-	return c.finishWrite(err)
+	complete := 0
+	for _, end := range frameEnds {
+		if end > n {
+			break
+		}
+		complete++
+	}
+	return complete, c.finishWrite(err)
 }
 
 func clearBuffers(buffers []*buf.Buffer) {

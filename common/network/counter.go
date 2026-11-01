@@ -102,7 +102,7 @@ func UnwrapCountPacketWriter(writer PacketWriter, countFunc []CountFunc) (Packet
 		return writer, countFunc
 	}
 	switch u := writer.(type) {
-	case PacketBatchWriter, PacketBatchWriteCreator, ConnectedPacketBatchWriter, ConnectedPacketBatchWriteCreator, syscall.Conn:
+	case PacketBatchWriter, PacketBatchWriteCreator, PacketBatchWriterWithCount, PacketBatchWriteCountCreator, ConnectedPacketBatchWriter, ConnectedPacketBatchWriteCreator, ConnectedPacketBatchWriterWithCount, ConnectedPacketBatchWriteCountCreator, syscall.Conn:
 		// In our use cases, counters is always at the top, so we stop when we encounter syscall conn
 		return writer, countFunc
 	case WithUpstreamWriter:

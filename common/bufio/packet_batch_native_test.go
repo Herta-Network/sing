@@ -5,7 +5,9 @@ package bufio
 import (
 	"errors"
 	"io"
+	"net"
 	"net/netip"
+	"os"
 	"reflect"
 	"syscall"
 	"testing"
@@ -51,7 +53,14 @@ func TestNativePacketBatchPartialWriteOwnership(t *testing.T) {
 		}
 		buffers := testBuffers("a", "bb", "ccc")
 		destination := M.ParseSocksaddr("127.0.0.1:1001")
-		err := writer.WritePacketBatch(buffers, []M.Socksaddr{destination, destination, destination})
+		n, err := writer.WritePacketBatchCount(buffers, []M.Socksaddr{destination, destination, destination})
+		wantN := 3
+		if fail {
+			wantN = 1
+		}
+		if n != wantN {
+			t.Fatalf("written=%d want=%d", n, wantN)
+		}
 		if fail && !errors.Is(err, syscall.EIO) || !fail && err != nil {
 			t.Fatalf("fail=%v error=%v", fail, err)
 		}
@@ -164,5 +173,66 @@ func TestScalarPacketWaiterRejectsTruncation(t *testing.T) {
 	buffer, _, err := waiter.WaitReadPacket()
 	if !errors.Is(err, io.ErrShortBuffer) || buffer != nil {
 		t.Fatalf("truncated scalar packet buffer=%v err=%v", buffer, err)
+	}
+}
+
+type stoppedBatchRawConn struct{ err error }
+
+func (*stoppedBatchRawConn) Control(func(uintptr)) error               { return nil }
+func (*stoppedBatchRawConn) Read(func(uintptr) bool) error             { return io.EOF }
+func (r *stoppedBatchRawConn) Write(callback func(uintptr) bool) error { callback(0); return r.err }
+
+func TestNativePacketBatchCountBeforeTimeoutOrClose(t *testing.T) {
+	for _, stop := range []error{os.ErrDeadlineExceeded, net.ErrClosed} {
+		raw := &stoppedBatchRawConn{stop}
+		writer := &syscallPacketBatchWriter{rawConn: raw, localAddr: netip.MustParseAddrPort("127.0.0.1:1000")}
+		writer.write.initialize(raw)
+		calls := 0
+		writer.write.send = func(_ int, messages []packetBatchMessage, _ int) (int, syscall.Errno) {
+			calls++
+			if calls == 1 {
+				return 1, 0
+			}
+			if len(messages) != 2 {
+				t.Fatalf("retried successful prefix: %d messages", len(messages))
+			}
+			return 0, syscall.EAGAIN
+		}
+		buffers := testBuffers("a", "bb", "ccc")
+		destination := M.ParseSocksaddr("127.0.0.1:1001")
+		n, err := writer.WritePacketBatchCount(buffers, []M.Socksaddr{destination, destination, destination})
+		if n != 1 || !errors.Is(err, stop) {
+			t.Fatalf("n=%d err=%v", n, err)
+		}
+		for _, b := range buffers {
+			if b.RawCap() != 0 {
+				t.Fatal("partial write leaked payload")
+			}
+		}
+		if writer.write.writeMsgvec != nil {
+			t.Fatal("retained scratch after cancellation")
+		}
+	}
+}
+
+func TestNativePacketBatchCountEmptyDatagram(t *testing.T) {
+	input, output, dest := UDPPipe(t)
+	defer input.Close()
+	defer output.Close()
+	writer, ok := CreatePacketBatchWriterWithCount(NewPacketConn(input))
+	if !ok {
+		t.Fatal("missing native writer")
+	}
+	n, err := writer.WritePacketBatchCount(testBuffers("", "two"), []M.Socksaddr{dest, dest})
+	if err != nil || n != 2 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	output.SetReadDeadline(time.Now().Add(time.Second))
+	for _, want := range []string{"", "two"} {
+		p := make([]byte, 16)
+		n, _, err := output.ReadFrom(p)
+		if err != nil || string(p[:n]) != want {
+			t.Fatalf("got %q err=%v", p[:n], err)
+		}
 	}
 }

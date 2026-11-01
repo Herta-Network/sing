@@ -73,7 +73,7 @@ func (c *unidirectionalNATPacketConn) CreatePacketBatchWriter() (N.PacketBatchWr
 	if !created {
 		return nil, false
 	}
-	return &unidirectionalNATPacketBatchWriter{c, writer}, true
+	return &unidirectionalNATPacketBatchWriter{c, writer, NewPacketBatchWriterWithCount(c.NetPacketConn)}, true
 }
 
 func (c *unidirectionalNATPacketConn) CreateConnectedPacketBatchWriter() (N.ConnectedPacketBatchWriter, bool) {
@@ -82,7 +82,8 @@ func (c *unidirectionalNATPacketConn) CreateConnectedPacketBatchWriter() (N.Conn
 
 type unidirectionalNATPacketBatchWriter struct {
 	*unidirectionalNATPacketConn
-	writer N.PacketBatchWriter
+	writer        N.PacketBatchWriter
+	countedWriter N.PacketBatchWriterWithCount
 }
 
 func (w *unidirectionalNATPacketBatchWriter) WritePacketBatch(buffers []*buf.Buffer, destinations []M.Socksaddr) error {
@@ -180,7 +181,7 @@ func (c *bidirectionalNATPacketConn) CreatePacketBatchWriter() (N.PacketBatchWri
 	if !created {
 		return nil, false
 	}
-	return &bidirectionalNATPacketBatchWriter{c, writer}, true
+	return &bidirectionalNATPacketBatchWriter{c, writer, NewPacketBatchWriterWithCount(c.NetPacketConn)}, true
 }
 
 func (c *bidirectionalNATPacketConn) CreateConnectedPacketBatchWriter() (N.ConnectedPacketBatchWriter, bool) {
@@ -189,7 +190,8 @@ func (c *bidirectionalNATPacketConn) CreateConnectedPacketBatchWriter() (N.Conne
 
 type bidirectionalNATPacketBatchWriter struct {
 	*bidirectionalNATPacketConn
-	writer N.PacketBatchWriter
+	writer        N.PacketBatchWriter
+	countedWriter N.PacketBatchWriterWithCount
 }
 
 func (w *bidirectionalNATPacketBatchWriter) WritePacketBatch(buffers []*buf.Buffer, destinations []M.Socksaddr) error {
@@ -268,7 +270,7 @@ func (c *destinationNATPacketConn) CreatePacketBatchWriter() (N.PacketBatchWrite
 	if !created {
 		return nil, false
 	}
-	return &destinationNATPacketBatchWriter{c, writer}, true
+	return &destinationNATPacketBatchWriter{c, writer, NewPacketBatchWriterWithCount(c.NetPacketConn)}, true
 }
 
 func (c *destinationNATPacketConn) CreateConnectedPacketBatchWriter() (N.ConnectedPacketBatchWriter, bool) {
@@ -277,7 +279,8 @@ func (c *destinationNATPacketConn) CreateConnectedPacketBatchWriter() (N.Connect
 
 type destinationNATPacketBatchWriter struct {
 	*destinationNATPacketConn
-	writer N.PacketBatchWriter
+	writer        N.PacketBatchWriter
+	countedWriter N.PacketBatchWriterWithCount
 }
 
 func (w *destinationNATPacketBatchWriter) WritePacketBatch(buffers []*buf.Buffer, destinations []M.Socksaddr) error {
@@ -308,4 +311,68 @@ func (c *destinationNATPacketConn) RemoteAddr() net.Addr {
 func socksaddrWithoutPort(destination M.Socksaddr) M.Socksaddr {
 	destination.Port = 0
 	return destination
+}
+func (c *unidirectionalNATPacketConn) CreatePacketBatchWriterWithCount() (N.PacketBatchWriterWithCount, bool) {
+	return &unidirectionalNATPacketBatchWriter{unidirectionalNATPacketConn: c, countedWriter: NewPacketBatchWriterWithCount(c.NetPacketConn)}, true
+}
+func (c *unidirectionalNATPacketConn) CreateConnectedPacketBatchWriterWithCount() (N.ConnectedPacketBatchWriterWithCount, bool) {
+	return CreateConnectedPacketBatchWriterWithCount(c.NetPacketConn)
+}
+func (w *unidirectionalNATPacketBatchWriter) WritePacketBatchCount(buffers []*buf.Buffer, destinations []M.Socksaddr) (int, error) {
+	if len(buffers) == 0 || len(buffers) != len(destinations) {
+		buf.ReleaseMulti(buffers)
+		return 0, os.ErrInvalid
+	}
+	for index, destination := range destinations {
+		if socksaddrWithoutPort(destination) == w.destination {
+			destinations[index] = M.Socksaddr{
+				Addr: w.origin.Addr,
+				Fqdn: w.origin.Fqdn,
+				Port: destination.Port,
+			}
+		}
+	}
+	return w.countedWriter.WritePacketBatchCount(buffers, destinations)
+}
+
+func (c *bidirectionalNATPacketConn) CreatePacketBatchWriterWithCount() (N.PacketBatchWriterWithCount, bool) {
+	return &bidirectionalNATPacketBatchWriter{bidirectionalNATPacketConn: c, countedWriter: NewPacketBatchWriterWithCount(c.NetPacketConn)}, true
+}
+func (c *bidirectionalNATPacketConn) CreateConnectedPacketBatchWriterWithCount() (N.ConnectedPacketBatchWriterWithCount, bool) {
+	return CreateConnectedPacketBatchWriterWithCount(c.NetPacketConn)
+}
+func (w *bidirectionalNATPacketBatchWriter) WritePacketBatchCount(buffers []*buf.Buffer, destinations []M.Socksaddr) (int, error) {
+	if len(buffers) == 0 || len(buffers) != len(destinations) {
+		buf.ReleaseMulti(buffers)
+		return 0, os.ErrInvalid
+	}
+	for index, destination := range destinations {
+		if socksaddrWithoutPort(destination) == w.destination {
+			destinations[index] = M.Socksaddr{
+				Addr: w.origin.Addr,
+				Fqdn: w.origin.Fqdn,
+				Port: destination.Port,
+			}
+		}
+	}
+	return w.countedWriter.WritePacketBatchCount(buffers, destinations)
+}
+
+func (c *destinationNATPacketConn) CreatePacketBatchWriterWithCount() (N.PacketBatchWriterWithCount, bool) {
+	return &destinationNATPacketBatchWriter{destinationNATPacketConn: c, countedWriter: NewPacketBatchWriterWithCount(c.NetPacketConn)}, true
+}
+func (c *destinationNATPacketConn) CreateConnectedPacketBatchWriterWithCount() (N.ConnectedPacketBatchWriterWithCount, bool) {
+	return CreateConnectedPacketBatchWriterWithCount(c.NetPacketConn)
+}
+func (w *destinationNATPacketBatchWriter) WritePacketBatchCount(buffers []*buf.Buffer, destinations []M.Socksaddr) (int, error) {
+	if len(buffers) == 0 || len(buffers) != len(destinations) {
+		buf.ReleaseMulti(buffers)
+		return 0, os.ErrInvalid
+	}
+	for index, destination := range destinations {
+		if destination == w.destination {
+			destinations[index] = w.origin
+		}
+	}
+	return w.countedWriter.WritePacketBatchCount(buffers, destinations)
 }

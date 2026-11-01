@@ -92,18 +92,13 @@ func (w *counterPacketBatchWriter) WritePacketBatch(buffers []*buf.Buffer, desti
 	for index, buffer := range buffers {
 		dataLens[index] = int64(buffer.Len())
 	}
-	err := w.writer.WritePacketBatch(buffers, destinations)
-	if err != nil {
-		return err
-	}
-	for _, dataLen := range dataLens {
-		if dataLen > 0 {
-			for _, counter := range w.writeCounts {
-				counter(dataLen)
-			}
+	n, err := writePacketBatchCount(w.writer, buffers, destinations)
+	for _, dataLen := range dataLens[:n] {
+		for _, counter := range w.writeCounts {
+			counter(dataLen)
 		}
 	}
-	return nil
+	return err
 }
 
 func (c *CounterPacketConn) CreateConnectedPacketBatchWriter() (N.ConnectedPacketBatchWriter, bool) {
@@ -132,18 +127,84 @@ func (w *counterConnectedPacketBatchWriter) WriteConnectedPacketBatch(buffers []
 	for index, buffer := range buffers {
 		dataLens[index] = int64(buffer.Len())
 	}
-	err := w.writer.WriteConnectedPacketBatch(buffers)
-	if err != nil {
-		return err
-	}
-	for _, dataLen := range dataLens {
-		if dataLen > 0 {
-			for _, counter := range w.writeCounts {
-				counter(dataLen)
-			}
+	n, err := writeConnectedPacketBatchCount(w.writer, buffers)
+	for _, dataLen := range dataLens[:n] {
+		for _, counter := range w.writeCounts {
+			counter(dataLen)
 		}
 	}
-	return nil
+	return err
+}
+
+func (c *CounterPacketConn) CreatePacketBatchWriterWithCount() (N.PacketBatchWriterWithCount, bool) {
+	writer, ok := CreatePacketBatchWriterWithCount(c.PacketConn)
+	if !ok {
+		return nil, false
+	}
+	return &countedCounterPacketBatchWriter{writer, c.writeCounter}, true
+}
+
+type countedCounterPacketBatchWriter struct {
+	writer      N.PacketBatchWriterWithCount
+	writeCounts []N.CountFunc
+}
+
+func (w *countedCounterPacketBatchWriter) WritePacketBatchCount(buffers []*buf.Buffer, destinations []M.Socksaddr) (int, error) {
+	if len(buffers) == 0 || len(buffers) != len(destinations) {
+		buf.ReleaseMulti(buffers)
+		return 0, os.ErrInvalid
+	}
+	var inline [DefaultPacketReadBatchSize]int
+	lengths := inline[:minPacketInt(len(buffers), len(inline))]
+	if len(buffers) > len(inline) {
+		lengths = make([]int, len(buffers))
+	}
+	for i, buffer := range buffers {
+		lengths[i] = buffer.Len()
+	}
+	n, err := w.writer.WritePacketBatchCount(buffers, destinations)
+	n, err = CheckPacketBatchCount(n, len(buffers), err)
+	for _, length := range lengths[:n] {
+		for _, counter := range w.writeCounts {
+			counter(int64(length))
+		}
+	}
+	return n, err
+}
+
+func (c *CounterPacketConn) CreateConnectedPacketBatchWriterWithCount() (N.ConnectedPacketBatchWriterWithCount, bool) {
+	writer, ok := CreateConnectedPacketBatchWriterWithCount(c.PacketConn)
+	if !ok {
+		return nil, false
+	}
+	return &countedCounterConnectedPacketBatchWriter{writer, c.writeCounter}, true
+}
+
+type countedCounterConnectedPacketBatchWriter struct {
+	writer      N.ConnectedPacketBatchWriterWithCount
+	writeCounts []N.CountFunc
+}
+
+func (w *countedCounterConnectedPacketBatchWriter) WriteConnectedPacketBatchCount(buffers []*buf.Buffer) (int, error) {
+	if len(buffers) == 0 {
+		return 0, os.ErrInvalid
+	}
+	var inline [DefaultPacketReadBatchSize]int
+	lengths := inline[:minPacketInt(len(buffers), len(inline))]
+	if len(buffers) > len(inline) {
+		lengths = make([]int, len(buffers))
+	}
+	for i, buffer := range buffers {
+		lengths[i] = buffer.Len()
+	}
+	n, err := w.writer.WriteConnectedPacketBatchCount(buffers)
+	n, err = CheckPacketBatchCount(n, len(buffers), err)
+	for _, length := range lengths[:n] {
+		for _, counter := range w.writeCounts {
+			counter(int64(length))
+		}
+	}
+	return n, err
 }
 
 func (c *CounterPacketConn) CreatePacketBatchReadWaiter() (N.PacketBatchReadWaiter, bool) {

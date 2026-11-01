@@ -163,20 +163,21 @@ func (s *Service[T]) Len() int { return s.nat.Len() }
 var _ N.PacketConn = (*conn)(nil)
 
 type conn struct {
-	ctx             context.Context
-	cancel          common.ContextCancelCauseFunc
-	data            chan *N.PacketBuffer
-	localAddr       M.Socksaddr
-	remoteAddr      M.Socksaddr
-	stateAccess     sync.RWMutex
-	closed          bool
-	closeErr        error
-	source          N.PacketWriter
-	batchWriter     N.PacketBatchWriter
-	readDeadline    pipe.Deadline
-	readWaitOptions N.ReadWaitOptions
-	batchBuffers    []*buf.Buffer
-	batchAddresses  []M.Socksaddr
+	ctx              context.Context
+	cancel           common.ContextCancelCauseFunc
+	data             chan *N.PacketBuffer
+	localAddr        M.Socksaddr
+	remoteAddr       M.Socksaddr
+	stateAccess      sync.RWMutex
+	closed           bool
+	closeErr         error
+	source           N.PacketWriter
+	batchWriter      N.PacketBatchWriter
+	batchCountWriter N.PacketBatchWriterWithCount
+	readDeadline     pipe.Deadline
+	readWaitOptions  N.ReadWaitOptions
+	batchBuffers     []*buf.Buffer
+	batchAddresses   []M.Socksaddr
 }
 
 func (c *conn) ReadPacket(buffer *buf.Buffer) (addr M.Socksaddr, err error) {
@@ -233,6 +234,7 @@ func (c *conn) Close() error {
 	source := c.source
 	c.source = nil
 	c.batchWriter = nil
+	c.batchCountWriter = nil
 	for {
 		select {
 		case p := <-c.data:

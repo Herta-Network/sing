@@ -38,7 +38,7 @@ func copyPacketWaitWithPool(session *packetCopySession, destinationConn N.Packet
 	}
 }
 
-func copyPacketBatchWaitWithPool(session *packetCopySession, destinationConn N.PacketBatchWriter, source N.PacketBatchReadWaiter, notFirstTime bool) (handled bool, n int64, err error) {
+func copyPacketBatchWaitWithPool(session *packetCopySession, destinationConn N.PacketBatchWriterWithCount, source N.PacketBatchReadWaiter, notFirstTime bool) (handled bool, n int64, err error) {
 	handled = true
 	for {
 		var (
@@ -62,7 +62,19 @@ func copyPacketBatchWaitWithPool(session *packetCopySession, destinationConn N.P
 		for index, buffer := range buffers {
 			dataLens[index] = buffer.Len()
 		}
-		err = destinationConn.WritePacketBatch(buffers, destinations)
+		written, writeErr := destinationConn.WritePacketBatchCount(buffers, destinations)
+		written, writeErr = CheckPacketBatchCount(written, len(buffers), writeErr)
+		err = writeErr
+		for _, length := range dataLens[:written] {
+			n += int64(length)
+		}
+		if written > 0 {
+			notFirstTime = true
+			transferErr := session.TransferBatch(dataLens[:written])
+			if err == nil {
+				err = transferErr
+			}
+		}
 		if err != nil {
 			if !notFirstTime {
 				handshakeErr := N.ReportHandshakeFailure(session.originSource, err)
@@ -72,17 +84,10 @@ func copyPacketBatchWaitWithPool(session *packetCopySession, destinationConn N.P
 			}
 			return
 		}
-		for _, dataLen := range dataLens {
-			n += int64(dataLen)
-		}
-		if err = session.TransferBatch(dataLens); err != nil {
-			return
-		}
-		notFirstTime = true
 	}
 }
 
-func copyPacketBatchToConnectedWaitWithPool(session *packetCopySession, destinationConn N.ConnectedPacketBatchWriter, source N.PacketBatchReadWaiter, notFirstTime bool) (handled bool, n int64, err error) {
+func copyPacketBatchToConnectedWaitWithPool(session *packetCopySession, destinationConn N.ConnectedPacketBatchWriterWithCount, source N.PacketBatchReadWaiter, notFirstTime bool) (handled bool, n int64, err error) {
 	handled = true
 	for {
 		var (
@@ -106,7 +111,19 @@ func copyPacketBatchToConnectedWaitWithPool(session *packetCopySession, destinat
 		for index, buffer := range buffers {
 			dataLens[index] = buffer.Len()
 		}
-		err = destinationConn.WriteConnectedPacketBatch(buffers)
+		written, writeErr := destinationConn.WriteConnectedPacketBatchCount(buffers)
+		written, writeErr = CheckPacketBatchCount(written, len(buffers), writeErr)
+		err = writeErr
+		for _, length := range dataLens[:written] {
+			n += int64(length)
+		}
+		if written > 0 {
+			notFirstTime = true
+			transferErr := session.TransferBatch(dataLens[:written])
+			if err == nil {
+				err = transferErr
+			}
+		}
 		if err != nil {
 			if !notFirstTime {
 				handshakeErr := N.ReportHandshakeFailure(session.originSource, err)
@@ -116,17 +133,10 @@ func copyPacketBatchToConnectedWaitWithPool(session *packetCopySession, destinat
 			}
 			return
 		}
-		for _, dataLen := range dataLens {
-			n += int64(dataLen)
-		}
-		if err = session.TransferBatch(dataLens); err != nil {
-			return
-		}
-		notFirstTime = true
 	}
 }
 
-func copyConnectedPacketBatchWaitWithPool(session *packetCopySession, destinationConn N.PacketBatchWriter, source N.ConnectedPacketBatchReadWaiter, notFirstTime bool) (handled bool, n int64, err error) {
+func copyConnectedPacketBatchWaitWithPool(session *packetCopySession, destinationConn N.PacketBatchWriterWithCount, source N.ConnectedPacketBatchReadWaiter, notFirstTime bool) (handled bool, n int64, err error) {
 	handled = true
 	for {
 		var (
@@ -156,7 +166,19 @@ func copyConnectedPacketBatchWaitWithPool(session *packetCopySession, destinatio
 			destinations[index] = destination
 			dataLens[index] = buffer.Len()
 		}
-		err = destinationConn.WritePacketBatch(buffers, destinations)
+		written, writeErr := destinationConn.WritePacketBatchCount(buffers, destinations)
+		written, writeErr = CheckPacketBatchCount(written, len(buffers), writeErr)
+		err = writeErr
+		for _, length := range dataLens[:written] {
+			n += int64(length)
+		}
+		if written > 0 {
+			notFirstTime = true
+			transferErr := session.TransferBatch(dataLens[:written])
+			if err == nil {
+				err = transferErr
+			}
+		}
 		if err != nil {
 			if !notFirstTime {
 				handshakeErr := N.ReportHandshakeFailure(session.originSource, err)
@@ -166,17 +188,10 @@ func copyConnectedPacketBatchWaitWithPool(session *packetCopySession, destinatio
 			}
 			return
 		}
-		for _, dataLen := range dataLens {
-			n += int64(dataLen)
-		}
-		if err = session.TransferBatch(dataLens); err != nil {
-			return
-		}
-		notFirstTime = true
 	}
 }
 
-func copyConnectedPacketBatchToConnectedWaitWithPool(session *packetCopySession, destinationConn N.ConnectedPacketBatchWriter, source N.ConnectedPacketBatchReadWaiter, notFirstTime bool) (handled bool, n int64, err error) {
+func copyConnectedPacketBatchToConnectedWaitWithPool(session *packetCopySession, destinationConn N.ConnectedPacketBatchWriterWithCount, source N.ConnectedPacketBatchReadWaiter, notFirstTime bool) (handled bool, n int64, err error) {
 	handled = true
 	for {
 		var buffers []*buf.Buffer
@@ -197,7 +212,19 @@ func copyConnectedPacketBatchToConnectedWaitWithPool(session *packetCopySession,
 		for index, buffer := range buffers {
 			dataLens[index] = buffer.Len()
 		}
-		err = destinationConn.WriteConnectedPacketBatch(buffers)
+		written, writeErr := destinationConn.WriteConnectedPacketBatchCount(buffers)
+		written, writeErr = CheckPacketBatchCount(written, len(buffers), writeErr)
+		err = writeErr
+		for _, length := range dataLens[:written] {
+			n += int64(length)
+		}
+		if written > 0 {
+			notFirstTime = true
+			transferErr := session.TransferBatch(dataLens[:written])
+			if err == nil {
+				err = transferErr
+			}
+		}
 		if err != nil {
 			if !notFirstTime {
 				handshakeErr := N.ReportHandshakeFailure(session.originSource, err)
@@ -207,12 +234,5 @@ func copyConnectedPacketBatchToConnectedWaitWithPool(session *packetCopySession,
 			}
 			return
 		}
-		for _, dataLen := range dataLens {
-			n += int64(dataLen)
-		}
-		if err = session.TransferBatch(dataLens); err != nil {
-			return
-		}
-		notFirstTime = true
 	}
 }

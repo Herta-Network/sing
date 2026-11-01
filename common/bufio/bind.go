@@ -50,6 +50,10 @@ func (c *bindPacketConn) CreatePacketBatchWriter() (N.PacketBatchWriter, bool) {
 	return CreatePacketBatchWriter(c.NetPacketConn)
 }
 
+func (c *bindPacketConn) CreatePacketBatchWriterWithCount() (N.PacketBatchWriterWithCount, bool) {
+	return CreatePacketBatchWriterWithCount(c.NetPacketConn)
+}
+
 func (c *bindPacketConn) RemoteAddr() net.Addr {
 	return c.addr
 }

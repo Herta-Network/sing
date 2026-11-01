@@ -29,19 +29,20 @@ var _ N.PacketBatchReadWaitCreator = (*natConn)(nil)
 var _ N.PacketBatchWriteCreator = (*natConn)(nil)
 
 type natConn struct {
-	cache           freelru.Cache[netip.AddrPort, *natConn]
-	writer          N.PacketWriter
-	batchWriter     N.PacketBatchWriter
-	localAddr       M.Socksaddr
-	handlerAccess   sync.RWMutex
-	handler         N.UDPHandlerEx
-	closed          bool
-	closeError      error
-	onClose         N.CloseHandlerFunc
-	packetChan      chan *N.PacketBuffer
-	doneChan        chan struct{}
-	readDeadline    pipe.Deadline
-	readWaitOptions N.ReadWaitOptions
+	cache            freelru.Cache[netip.AddrPort, *natConn]
+	writer           N.PacketWriter
+	batchWriter      N.PacketBatchWriter
+	batchCountWriter N.PacketBatchWriterWithCount
+	localAddr        M.Socksaddr
+	handlerAccess    sync.RWMutex
+	handler          N.UDPHandlerEx
+	closed           bool
+	closeError       error
+	onClose          N.CloseHandlerFunc
+	packetChan       chan *N.PacketBuffer
+	doneChan         chan struct{}
+	readDeadline     pipe.Deadline
+	readWaitOptions  N.ReadWaitOptions
 	// One reader owns these borrowed result slices, including reinitialization.
 	batchBuffers   []*buf.Buffer
 	batchAddresses []M.Socksaddr
@@ -294,4 +295,22 @@ func (c *natConn) Upstream() any {
 	c.handlerAccess.RLock()
 	defer c.handlerAccess.RUnlock()
 	return c.writer
+}
+
+func (c *natConn) CreatePacketBatchWriterWithCount() (N.PacketBatchWriterWithCount, bool) {
+	return c, true
+}
+func (c *natConn) WritePacketBatchCount(buffers []*buf.Buffer, destinations []M.Socksaddr) (int, error) {
+	c.handlerAccess.Lock()
+	if c.closed || c.writer == nil {
+		c.handlerAccess.Unlock()
+		buf.ReleaseMulti(buffers)
+		return 0, io.ErrClosedPipe
+	}
+	if c.batchCountWriter == nil {
+		c.batchCountWriter = bufio.NewPacketBatchWriterWithCount(c.writer)
+	}
+	writer := c.batchCountWriter
+	c.handlerAccess.Unlock()
+	return writer.WritePacketBatchCount(buffers, destinations)
 }

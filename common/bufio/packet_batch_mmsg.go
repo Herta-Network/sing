@@ -252,19 +252,24 @@ func createSyscallConnectedPacketBatchWriter(writer any) (N.ConnectedPacketBatch
 }
 
 func (w *syscallPacketBatchWriter) WritePacketBatch(buffers []*buf.Buffer, destinations []M.Socksaddr) error {
+	_, err := w.WritePacketBatchCount(buffers, destinations)
+	return err
+}
+
+func (w *syscallPacketBatchWriter) WritePacketBatchCount(buffers []*buf.Buffer, destinations []M.Socksaddr) (int, error) {
 	if w.connected {
 		buf.ReleaseMulti(buffers)
-		return os.ErrInvalid
+		return 0, os.ErrInvalid
 	}
 	w.access.Lock()
 	defer w.access.Unlock()
 	defer buf.ReleaseMulti(buffers)
 	if len(buffers) == 0 || len(buffers) != len(destinations) {
-		return os.ErrInvalid
+		return 0, os.ErrInvalid
 	}
 	for _, destination := range destinations {
 		if !destination.IsIP() {
-			return os.ErrInvalid
+			return 0, os.ErrInvalid
 		}
 	}
 	if !w.localAddr.IsValid() {
@@ -277,7 +282,7 @@ func (w *syscallPacketBatchWriter) WritePacketBatch(buffers []*buf.Buffer, desti
 			return nil
 		})
 		if err != nil {
-			return err
+			return 0, err
 		}
 	}
 	names := growSlice(w.names, len(buffers))
@@ -302,19 +307,24 @@ func (w *syscallPacketBatchWriter) WritePacketBatch(buffers []*buf.Buffer, desti
 			msgvec[i].msgHdr.SetIovlen(1)
 		}
 	}
-	return w.write.Write(msgvec)
+	return w.write.WriteCount(msgvec)
 }
 
 func (w *syscallPacketBatchWriter) WriteConnectedPacketBatch(buffers []*buf.Buffer) error {
+	_, err := w.WriteConnectedPacketBatchCount(buffers)
+	return err
+}
+
+func (w *syscallPacketBatchWriter) WriteConnectedPacketBatchCount(buffers []*buf.Buffer) (int, error) {
 	if !w.connected {
 		buf.ReleaseMulti(buffers)
-		return os.ErrInvalid
+		return 0, os.ErrInvalid
 	}
 	w.access.Lock()
 	defer w.access.Unlock()
 	defer buf.ReleaseMulti(buffers)
 	if len(buffers) == 0 {
-		return os.ErrInvalid
+		return 0, os.ErrInvalid
 	}
 	iovecs := growSlice(w.iovecs, len(buffers))
 	msgvec := growSlice(w.msgvec, len(buffers))
@@ -333,7 +343,7 @@ func (w *syscallPacketBatchWriter) WriteConnectedPacketBatch(buffers []*buf.Buff
 			msgvec[i].msgHdr.SetIovlen(1)
 		}
 	}
-	return w.write.Write(msgvec)
+	return w.write.WriteCount(msgvec)
 }
 
 func (w *syscallPacketBatchWriter) Upstream() any {
@@ -357,14 +367,20 @@ func (w *packetMMsgWriteState) initialize(rawConn syscall.RawConn) {
 }
 
 func (w *packetMMsgWriteState) Write(msgvec []mmsghdr) error {
+	_, err := w.WriteCount(msgvec)
+	return err
+}
+
+func (w *packetMMsgWriteState) WriteCount(msgvec []mmsghdr) (int, error) {
 	w.writeMsgvec = msgvec
 	w.innerErr = 0
 	err := w.rawConn.Write(w.writeFunc)
+	written := len(msgvec) - len(w.writeMsgvec)
 	w.writeMsgvec = nil
-	if w.innerErr != 0 {
-		return os.NewSyscallError("sendmmsg", w.innerErr)
+	if w.innerErr != 0 && w.innerErr != syscall.EAGAIN && w.innerErr != syscall.EWOULDBLOCK {
+		return written, os.NewSyscallError("sendmmsg", w.innerErr)
 	}
-	return err
+	return written, err
 }
 
 func (w *packetMMsgWriteState) write(fd uintptr) (done bool) {

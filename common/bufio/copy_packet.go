@@ -141,10 +141,20 @@ func copyPacketWithCountersOnce(session *packetCopySession, notFirstTime bool) (
 	source := session.source
 	destinationConn := session.destination
 	if session.batchSize > 1 {
+		batchWriter, isBatchWriter := CreatePacketBatchWriterWithCount(destinationConn)
+		var connectedBatchWriter N.ConnectedPacketBatchWriterWithCount
+		var isConnectedBatchWriter bool
+		if !isBatchWriter {
+			connectedBatchWriter, isConnectedBatchWriter = CreateConnectedPacketBatchWriterWithCount(destinationConn)
+		}
+		if !isBatchWriter && !isConnectedBatchWriter {
+			// An opaque error-only batch method cannot preserve the copy result or
+			// counters on failure. Keep batched reads and write each packet normally.
+			batchWriter, isBatchWriter = &fallbackPacketBatchWriter{destinationConn}, true
+		}
 		batchReadWaiter, isBatchReadWaiter := CreatePacketBatchReadWaiter(source)
 		if isBatchReadWaiter {
 			defer releaseReadWaiter(batchReadWaiter)
-			batchWriter, isBatchWriter := CreatePacketBatchWriter(destinationConn)
 			if isBatchWriter {
 				readWaitOptions := N.NewReadWaitOptions(source, destinationConn)
 				readWaitOptions.BatchSize = session.batchSize
@@ -157,7 +167,6 @@ func copyPacketWithCountersOnce(session *packetCopySession, notFirstTime bool) (
 					}
 				}
 			}
-			connectedBatchWriter, isConnectedBatchWriter := CreateConnectedPacketBatchWriter(destinationConn)
 			if isConnectedBatchWriter {
 				readWaitOptions := N.NewReadWaitOptions(source, destinationConn)
 				readWaitOptions.BatchSize = session.batchSize
@@ -174,7 +183,6 @@ func copyPacketWithCountersOnce(session *packetCopySession, notFirstTime bool) (
 		connectedBatchReadWaiter, isConnectedBatchReadWaiter := CreateConnectedPacketBatchReadWaiter(source)
 		if isConnectedBatchReadWaiter {
 			defer releaseReadWaiter(connectedBatchReadWaiter)
-			batchWriter, isBatchWriter := CreatePacketBatchWriter(destinationConn)
 			if isBatchWriter {
 				readWaitOptions := N.NewReadWaitOptions(source, destinationConn)
 				readWaitOptions.BatchSize = session.batchSize
@@ -187,7 +195,6 @@ func copyPacketWithCountersOnce(session *packetCopySession, notFirstTime bool) (
 					}
 				}
 			}
-			connectedBatchWriter, isConnectedBatchWriter := CreateConnectedPacketBatchWriter(destinationConn)
 			if isConnectedBatchWriter {
 				readWaitOptions := N.NewReadWaitOptions(source, destinationConn)
 				readWaitOptions.BatchSize = session.batchSize

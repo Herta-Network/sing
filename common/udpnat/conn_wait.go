@@ -114,3 +114,42 @@ func (c *conn) WaitReadPacket() (buffer *buf.Buffer, destination M.Socksaddr, er
 	N.PutPacketBuffer(p)
 	return buffer, destination, nil
 }
+
+func (c *conn) CreatePacketBatchWriterWithCount() (N.PacketBatchWriterWithCount, bool) {
+	_, ok := c.packetBatchCountWriter()
+	if !ok {
+		return nil, false
+	}
+	return c, true
+}
+
+func (c *conn) packetBatchCountWriter() (N.PacketBatchWriterWithCount, bool) {
+	c.stateAccess.RLock()
+	closed, source, writer := c.closed || common.Done(c.ctx), c.source, c.batchCountWriter
+	c.stateAccess.RUnlock()
+	if closed || source == nil {
+		return nil, false
+	}
+	if writer != nil {
+		return writer, true
+	}
+	created := bufio.NewPacketBatchWriterWithCount(source)
+	c.stateAccess.Lock()
+	defer c.stateAccess.Unlock()
+	if c.closed || common.Done(c.ctx) {
+		return nil, false
+	}
+	if c.batchCountWriter == nil {
+		c.batchCountWriter = created
+	}
+	return c.batchCountWriter, true
+}
+
+func (c *conn) WritePacketBatchCount(buffers []*buf.Buffer, destinations []M.Socksaddr) (int, error) {
+	writer, ok := c.packetBatchCountWriter()
+	if !ok {
+		buf.ReleaseMulti(buffers)
+		return 0, io.ErrClosedPipe
+	}
+	return writer.WritePacketBatchCount(buffers, destinations)
+}
