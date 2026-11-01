@@ -91,13 +91,11 @@ func (w *BufferedVectorisedWriter) WriteVectorised(buffers []*buf.Buffer) error 
 	} else if len(buffers) == 1 {
 		return writeVectorBytes(w.upstream, buffers[0].Bytes())
 	}
-	var bufferBytes []byte
-	if bufferLen > 65535 {
+	bufferBytes := buf.Get(bufferLen)
+	if bufferBytes == nil {
 		bufferBytes = make([]byte, bufferLen)
 	} else {
-		buffer := buf.NewSize(bufferLen)
-		defer buffer.Release()
-		bufferBytes = buffer.FreeBytes()
+		defer buf.Put(bufferBytes)
 	}
 	buf.CopyMulti(bufferBytes, buffers)
 	return writeVectorBytes(w.upstream, bufferBytes)

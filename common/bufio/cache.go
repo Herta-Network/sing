@@ -3,6 +3,8 @@ package bufio
 import (
 	"io"
 	"net"
+	"sync"
+	"sync/atomic"
 
 	"github.com/metacubex/sing/common/buf"
 	M "github.com/metacubex/sing/common/metadata"
@@ -151,20 +153,36 @@ func (r *CachedReader) Close() error {
 
 type CachedPacketConn struct {
 	N.PacketConn
-	buffer      *buf.Buffer
-	destination M.Socksaddr
+	buffer            *buf.Buffer
+	destination       M.Socksaddr
+	readAccess        sync.Mutex
+	closed            atomic.Bool
+	closeOnce         sync.Once
+	closeErr          error
+	waiter            N.PacketReadWaiter
+	waiterView        cachedPacketReadWaiter
+	waiterInitialized bool
+	waitOptions       N.ReadWaitOptions
+	needCopy          bool
 }
 
 func NewCachedPacketConn(conn N.PacketConn, buffer *buf.Buffer, destination M.Socksaddr) *CachedPacketConn {
 	buffer.IncRef()
-	return &CachedPacketConn{
+	c := &CachedPacketConn{
 		PacketConn:  conn,
 		buffer:      buffer,
 		destination: destination,
 	}
+	c.waiterView.conn = c
+	return c
 }
 
 func (c *CachedPacketConn) ReadPacket(buffer *buf.Buffer) (destination M.Socksaddr, err error) {
+	c.readAccess.Lock()
+	defer c.readAccess.Unlock()
+	if c.closed.Load() {
+		return M.Socksaddr{}, net.ErrClosed
+	}
 	if c.buffer != nil {
 		// A cached empty datagram is a packet, not the EOF of buf.Buffer.Read.
 		if c.buffer.IsEmpty() {
@@ -182,10 +200,27 @@ func (c *CachedPacketConn) ReadPacket(buffer *buf.Buffer) (destination M.Socksad
 		c.buffer = nil
 		return c.destination, nil
 	}
+	if c.waiterInitialized {
+		packet, destination, err := c.waitReadPacket()
+		if err != nil {
+			return M.Socksaddr{}, err
+		}
+		defer packet.Release()
+		if packet.Len() > buffer.FreeLen() {
+			return M.Socksaddr{}, io.ErrShortBuffer
+		}
+		_, err = buffer.Write(packet.Bytes())
+		return destination, err
+	}
 	return c.PacketConn.ReadPacket(buffer)
 }
 
 func (c *CachedPacketConn) ReadCachedPacket() *N.PacketBuffer {
+	c.readAccess.Lock()
+	defer c.readAccess.Unlock()
+	if c.closed.Load() {
+		return nil
+	}
 	if c.buffer == nil {
 		return nil
 	}
@@ -207,7 +242,11 @@ func (c *CachedPacketConn) Upstream() any {
 }
 
 func (c *CachedPacketConn) ReaderReplaceable() bool {
-	return c.buffer == nil
+	if !c.readAccess.TryLock() {
+		return false
+	}
+	defer c.readAccess.Unlock()
+	return !c.closed.Load() && c.buffer == nil && c.waiter == nil
 }
 
 func (c *CachedPacketConn) WriterReplaceable() bool {
@@ -215,10 +254,18 @@ func (c *CachedPacketConn) WriterReplaceable() bool {
 }
 
 func (c *CachedPacketConn) Close() error {
-	if buffer := c.buffer; buffer != nil {
-		buffer.DecRef()
-		buffer.Release()
-		c.buffer = nil
-	}
-	return c.PacketConn.Close()
+	c.closeOnce.Do(func() {
+		c.closed.Store(true)
+		// Close the carrier before waiting for an active owned read.
+		c.closeErr = c.PacketConn.Close()
+		c.readAccess.Lock()
+		defer c.readAccess.Unlock()
+		if buffer := c.buffer; buffer != nil {
+			buffer.DecRef()
+			buffer.Release()
+			c.buffer = nil
+		}
+		c.releaseWaiter()
+	})
+	return c.closeErr
 }
