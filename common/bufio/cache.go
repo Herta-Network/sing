@@ -166,6 +166,13 @@ func NewCachedPacketConn(conn N.PacketConn, buffer *buf.Buffer, destination M.So
 
 func (c *CachedPacketConn) ReadPacket(buffer *buf.Buffer) (destination M.Socksaddr, err error) {
 	if c.buffer != nil {
+		// A cached empty datagram is a packet, not the EOF of buf.Buffer.Read.
+		if c.buffer.IsEmpty() {
+			c.buffer.DecRef()
+			c.buffer.Release()
+			c.buffer = nil
+			return c.destination, nil
+		}
 		_, err = buffer.ReadOnceFrom(c.buffer)
 		if err != nil {
 			return M.Socksaddr{}, err
@@ -179,6 +186,9 @@ func (c *CachedPacketConn) ReadPacket(buffer *buf.Buffer) (destination M.Socksad
 }
 
 func (c *CachedPacketConn) ReadCachedPacket() *N.PacketBuffer {
+	if c.buffer == nil {
+		return nil
+	}
 	buffer := c.buffer
 	c.buffer = nil
 	if buffer != nil {
