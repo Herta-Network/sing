@@ -39,3 +39,17 @@ func CreatePacketReadWaiter(reader N.PacketReader) (N.PacketReadWaiter, bool) {
 	}
 	return nil, false
 }
+
+func CreateVectorisedReadWaiter(reader io.Reader) (N.VectorisedReadWaiter, bool) {
+	reader = N.UnwrapReader(reader)
+	if waiter, ok := reader.(N.VectorisedReadWaiter); ok {
+		return waiter, true
+	}
+	if creator, ok := reader.(N.VectorisedReadWaitCreator); ok {
+		return creator.CreateVectorisedReadWaiter()
+	}
+	if waiter, ok := createVectorisedSyscallReadWaiter(reader); ok {
+		return waiter, true
+	}
+	return nil, false
+}

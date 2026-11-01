@@ -18,6 +18,12 @@ import (
 const MaxCopyExtendedOnceTimes = 10 // max CopyExtendedOnce execute times
 
 func Copy(destination io.Writer, source io.Reader) (n int64, err error) {
+	return CopyWithOptions(destination, source, CopyOptions{})
+}
+
+// CopyWithOptions preserves Copy's wrapper, handshake and accounting behavior.
+// Zero options keep the existing fast paths. Controlled reads are opt-in.
+func CopyWithOptions(destination io.Writer, source io.Reader, options CopyOptions) (n int64, err error) {
 	if source == nil {
 		return 0, E.New("nil reader")
 	} else if destination == nil {
@@ -25,6 +31,9 @@ func Copy(destination io.Writer, source io.Reader) (n int64, err error) {
 	}
 	originSource := source
 	var readCounters, writeCounters []N.CountFunc
+	if len(options.WriteCounters) > 0 {
+		writeCounters = append(writeCounters, options.WriteCounters...)
+	}
 	var _n int64
 	possibly := MaxCopyExtendedOnceTimes
 	for {
@@ -34,27 +43,35 @@ func Copy(destination io.Writer, source io.Reader) (n int64, err error) {
 			cachedBuffer := cachedSrc.ReadCached()
 			if cachedBuffer != nil {
 				dataLen := cachedBuffer.Len()
-				_, err = destination.Write(cachedBuffer.Bytes())
+				if err = options.beforeTransfer(dataLen); err != nil {
+					cachedBuffer.Release()
+					if n == 0 {
+						err = N.ReportHandshakeFailure(originSource, err)
+					}
+					return n, err
+				}
+				var written int
+				written, err = destination.Write(cachedBuffer.Bytes())
+				if written < 0 || written > dataLen {
+					written, err = 0, io.ErrShortWrite
+				} else if written != dataLen && err == nil {
+					err = io.ErrShortWrite
+				}
 				cachedBuffer.Release()
+				n += int64(written)
+				countTransfer(written, readCounters, writeCounters)
 				if err != nil {
 					return
-				}
-				for _, counter := range readCounters {
-					counter(int64(dataLen))
-				}
-				for _, counter := range writeCounters {
-					counter(int64(dataLen))
 				}
 				continue
 			}
 		}
 		replaceableReader, isReaderPossiblyReplaceable := source.(N.ReaderPossiblyReplaceable)
 		replaceableWriter, isWriterPossiblyReplaceable := destination.(N.WriterPossiblyReplaceable)
-		if possibly != 0 &&
-			(isReaderPossiblyReplaceable && replaceableReader.ReaderPossiblyReplaceable()) ||
-			(isWriterPossiblyReplaceable && replaceableWriter.WriterPossiblyReplaceable()) {
+		if possibly != 0 && ((isReaderPossiblyReplaceable && replaceableReader.ReaderPossiblyReplaceable()) ||
+			(isWriterPossiblyReplaceable && replaceableWriter.WriterPossiblyReplaceable())) {
 			possibly--
-			_n, err = CopyExtendedOnce(destination, source, readCounters, writeCounters)
+			_n, err = copyExtendedOnceWithOptions(destination, source, readCounters, writeCounters, options)
 			n += _n
 			if err != nil {
 				if n == _n { // first time
@@ -69,7 +86,7 @@ func Copy(destination io.Writer, source io.Reader) (n int64, err error) {
 		}
 		srcSyscallConn, srcIsSyscall := source.(syscall.Conn)
 		dstSyscallConn, dstIsSyscall := destination.(syscall.Conn)
-		if srcIsSyscall && dstIsSyscall {
+		if srcIsSyscall && dstIsSyscall && !options.controlled() {
 			var handled bool
 			handled, _n, err = copyDirect(srcSyscallConn, dstSyscallConn, readCounters, writeCounters)
 			if handled {
@@ -79,7 +96,11 @@ func Copy(destination io.Writer, source io.Reader) (n int64, err error) {
 		}
 		break
 	}
-	_n, err = CopyExtended(originSource, NewExtendedWriter(destination), NewExtendedReader(source), readCounters, writeCounters)
+	if options.controlled() {
+		_n, err = copyControlled(originSource, NewExtendedWriter(destination), NewExtendedReader(source), readCounters, writeCounters, options, n > 0)
+	} else {
+		_n, err = CopyExtended(originSource, NewExtendedWriter(destination), NewExtendedReader(source), readCounters, writeCounters)
+	}
 	n += _n
 	return
 }
@@ -102,6 +123,7 @@ func CopyExtended(originSource io.Reader, destination N.ExtendedWriter, source N
 	rearHeadroom := N.CalculateRearHeadroom(destination)
 	readWaiter, isReadWaiter := CreateReadWaiter(source)
 	if isReadWaiter {
+		defer releaseReadWaiter(readWaiter)
 		needCopy := readWaiter.InitializeReadWaiter(N.ReadWaitOptions{
 			FrontHeadroom: frontHeadroom,
 			RearHeadroom:  rearHeadroom,
@@ -265,6 +287,7 @@ func CopyPacketWithCounters(destinationConn N.PacketWriter, source N.PacketReade
 	)
 	readWaiter, isReadWaiter := CreatePacketReadWaiter(source)
 	if isReadWaiter {
+		defer releaseReadWaiter(readWaiter)
 		needCopy := readWaiter.InitializeReadWaiter(N.NewReadWaitOptions(source, destinationConn))
 		if !needCopy || common.LowMemory {
 			handled, copeN, err = copyPacketWaitWithPool(originSource, destinationConn, readWaiter, readCounters, writeCounters, n > 0)

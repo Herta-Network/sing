@@ -23,3 +23,32 @@ func TestReadWaitOptionsCopyPreservesLargePacket(t *testing.T) {
 		t.Fatal("copy did not release input ownership")
 	}
 }
+
+func TestReadWaitOptionsStreamLimitPreservesHeadroom(t *testing.T) {
+	for _, limit := range []int{4096, 16} {
+		options := ReadWaitOptions{FrontHeadroom: 8, RearHeadroom: 16, MTU: 65535, MaxBufferSize: limit}
+		buffer := options.NewBuffer()
+		if buffer.Start() != 8 || buffer.FreeLen() < 1 {
+			t.Fatal("stream limit consumed required headroom")
+		}
+		if limit == 4096 && buffer.Cap()+16 != limit {
+			t.Fatalf("stream requested capacity=%d, want %d", buffer.Cap()+16, limit)
+		}
+		if limit == 16 && buffer.FreeLen() != 1 {
+			t.Fatal("minimum payload should take precedence over an impossible limit")
+		}
+		options.PostReturn(buffer)
+		if buffer.FreeLen() < 16 {
+			t.Fatal("stream limit lost tail room")
+		}
+		buffer.Release()
+	}
+}
+
+func TestReadWaitOptionsDoesNotLimitDatagrams(t *testing.T) {
+	buffer := (ReadWaitOptions{MTU: 20000, MaxBufferSize: 128}).NewPacketBuffer()
+	defer buffer.Release()
+	if buffer.FreeLen() != 20000 {
+		t.Fatal("stream buffer limit truncated datagram capacity")
+	}
+}

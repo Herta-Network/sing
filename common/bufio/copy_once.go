@@ -9,10 +9,16 @@ import (
 )
 
 func CopyExtendedOnce(destination io.Writer, source io.Reader, readCounters []N.CountFunc, writeCounters []N.CountFunc) (n int64, err error) {
+	return copyExtendedOnceWithOptions(destination, source, readCounters, writeCounters, CopyOptions{})
+}
+
+func copyExtendedOnceWithOptions(destination io.Writer, source io.Reader, readCounters []N.CountFunc, writeCounters []N.CountFunc, policy CopyOptions) (n int64, err error) {
 	options := N.NewReadWaitOptions(source, destination)
+	options.MaxBufferSize = policy.readOptions().MaxBufferSize
 	var buffer *buf.Buffer
 	calledWaitRead := false
 	if readWaiter, isReadWaiter := CreateReadWaiter(source); isReadWaiter {
+		defer releaseReadWaiter(readWaiter)
 		if needCopy := readWaiter.InitializeReadWaiter(options); !needCopy || common.LowMemory {
 			calledWaitRead = true
 			buffer, err = readWaiter.WaitReadBuffer()
@@ -29,6 +35,10 @@ func CopyExtendedOnce(destination io.Writer, source io.Reader, readCounters []N.
 	}
 
 	dataLen := buffer.Len()
+	if err = policy.beforeTransfer(dataLen); err != nil {
+		buffer.Release()
+		return
+	}
 	err = NewExtendedWriter(destination).WriteBuffer(buffer)
 	if err != nil {
 		buffer.Release()

@@ -13,6 +13,10 @@ type ReadWaitOptions struct {
 	FrontHeadroom int
 	RearHeadroom  int
 	MTU           int
+	// MaxBufferSize applies to new stream buffers, not packet buffers. Required
+	// headroom plus one payload byte takes precedence over a smaller limit.
+	MaxBufferSize int
+	BatchSize     int
 }
 
 func NewReadWaitOptions(source any, destination any) ReadWaitOptions {
@@ -41,6 +45,23 @@ func (o ReadWaitOptions) Copy(buffer *buf.Buffer) *buf.Buffer {
 }
 
 func (o ReadWaitOptions) NewBuffer() *buf.Buffer {
+	if o.MaxBufferSize > 0 {
+		size := buf.BufferSize
+		if o.MTU > 0 {
+			size = o.MTU + o.FrontHeadroom + o.RearHeadroom
+		}
+		if size > o.MaxBufferSize {
+			size = o.MaxBufferSize
+		}
+		minimum := o.FrontHeadroom + o.RearHeadroom + 1
+		if size < minimum {
+			size = minimum
+		}
+		buffer := buf.NewSize(size)
+		buffer.Resize(o.FrontHeadroom, 0)
+		buffer.Reserve(o.RearHeadroom)
+		return buffer
+	}
 	return o.newBuffer(buf.BufferSize, true)
 }
 
@@ -78,6 +99,24 @@ type ReadWaiter interface {
 
 type ReadWaitCreator interface {
 	CreateReadWaiter() (ReadWaiter, bool)
+}
+
+type VectorisedReadWaiter interface {
+	ReadWaitable
+	// The result slice is valid until the next read, initialization or release.
+	// Buffer ownership transfers to the caller. Errors return no owned buffers.
+	WaitReadBuffers() ([]*buf.Buffer, error)
+}
+
+type VectorisedReadWaitCreator interface {
+	CreateVectorisedReadWaiter() (VectorisedReadWaiter, bool)
+}
+
+// ReadWaiterReleaser releases waiter-owned buffers without closing the source.
+// Calls must be serialized with reads and initialization. Release is idempotent
+// and never releases buffers already transferred to the caller.
+type ReadWaiterReleaser interface {
+	ReleaseReadWaiter()
 }
 
 type PacketReadWaiter interface {

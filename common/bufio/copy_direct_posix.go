@@ -35,6 +35,7 @@ func createSyscallReadWaiter(reader any) (*syscallReadWaiter, bool) {
 }
 
 func (w *syscallReadWaiter) InitializeReadWaiter(options N.ReadWaitOptions) (needCopy bool) {
+	w.ReleaseReadWaiter()
 	w.options = options
 	w.readFunc = func(fd uintptr) (done bool) {
 		buffer := w.options.NewBuffer()
@@ -65,9 +66,13 @@ func (w *syscallReadWaiter) WaitReadBuffer() (buffer *buf.Buffer, err error) {
 	}
 	err = w.rawConn.Read(w.readFunc)
 	if err != nil {
+		w.buffer.Release()
+		w.buffer = nil
 		return
 	}
 	if w.readErr != nil {
+		w.buffer.Release()
+		w.buffer = nil
 		if w.readErr == io.EOF {
 			return nil, io.EOF
 		}
@@ -76,6 +81,11 @@ func (w *syscallReadWaiter) WaitReadBuffer() (buffer *buf.Buffer, err error) {
 	buffer = w.buffer
 	w.buffer = nil
 	return
+}
+
+func (w *syscallReadWaiter) ReleaseReadWaiter() {
+	w.buffer.Release()
+	w.buffer, w.readFunc, w.readErr = nil, nil, nil
 }
 
 var _ N.PacketReadWaiter = (*syscallPacketReadWaiter)(nil)
@@ -100,6 +110,7 @@ func createSyscallPacketReadWaiter(reader any) (*syscallPacketReadWaiter, bool) 
 }
 
 func (w *syscallPacketReadWaiter) InitializeReadWaiter(options N.ReadWaitOptions) (needCopy bool) {
+	w.ReleaseReadWaiter()
 	w.options = options
 	w.readFunc = func(fd uintptr) (done bool) {
 		buffer := w.options.NewPacketBuffer()
@@ -133,9 +144,13 @@ func (w *syscallPacketReadWaiter) WaitReadPacket() (buffer *buf.Buffer, destinat
 	}
 	err = w.rawConn.Read(w.readFunc)
 	if err != nil {
+		w.buffer.Release()
+		w.buffer = nil
 		return
 	}
 	if w.readErr != nil {
+		w.buffer.Release()
+		w.buffer = nil
 		err = E.Cause(w.readErr, "raw read")
 		return
 	}
@@ -143,4 +158,10 @@ func (w *syscallPacketReadWaiter) WaitReadPacket() (buffer *buf.Buffer, destinat
 	w.buffer = nil
 	destination = w.readFrom
 	return
+}
+
+func (w *syscallPacketReadWaiter) ReleaseReadWaiter() {
+	w.buffer.Release()
+	w.buffer, w.readFunc, w.readErr = nil, nil, nil
+	w.readFrom = M.Socksaddr{}
 }

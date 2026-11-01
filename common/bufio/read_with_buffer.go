@@ -2,6 +2,7 @@ package bufio
 
 import (
 	"io"
+	"os"
 
 	"github.com/metacubex/sing/common/buf"
 	N "github.com/metacubex/sing/common/network"
@@ -32,8 +33,8 @@ func createReadWithBufferWaiter(reader any) (*readWithBufferWaiter, bool) {
 }
 
 func (w *readWithBufferWaiter) InitializeReadWaiter(options N.ReadWaitOptions) bool {
+	w.ReleaseReadWaiter()
 	w.options = options
-	w.buffer = nil
 	w.bufferForRead = func(sizeHint int) []byte {
 		w.buffer = w.options.NewBuffer()
 		return w.buffer.FreeBytes() // This slice starts after FrontHeadroom and ends before the reserved RearHeadroom.
@@ -41,7 +42,15 @@ func (w *readWithBufferWaiter) InitializeReadWaiter(options N.ReadWaitOptions) b
 	return false // The returned buffer already satisfies the requested headroom.
 }
 
+func (w *readWithBufferWaiter) ReleaseReadWaiter() {
+	w.buffer.Release()
+	w.buffer, w.bufferForRead = nil, nil
+}
+
 func (w *readWithBufferWaiter) WaitReadBuffer() (buffer *buf.Buffer, err error) {
+	if w.bufferForRead == nil {
+		return nil, os.ErrInvalid
+	}
 	n, err := w.reader.ReadWithBuffer(w.bufferForRead)
 
 	buffer = w.buffer
