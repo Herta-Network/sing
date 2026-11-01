@@ -1,9 +1,6 @@
 package udpnat
 
 import (
-	"io"
-	"os"
-
 	"github.com/metacubex/sing/common/buf"
 	M "github.com/metacubex/sing/common/metadata"
 	N "github.com/metacubex/sing/common/network"
@@ -17,25 +14,9 @@ func (c *conn) InitializeReadWaiter(options N.ReadWaitOptions) (needCopy bool) {
 }
 
 func (c *conn) WaitReadPacket() (buffer *buf.Buffer, destination M.Socksaddr, err error) {
-	select {
-	case p := <-c.data:
-		if c.readWaitOptions.NeedHeadroom() {
-			buffer = c.readWaitOptions.NewPacketBuffer()
-			_, err = buffer.Write(p.data.Bytes())
-			if err != nil {
-				buffer.Release()
-				return
-			}
-			c.readWaitOptions.PostReturn(buffer)
-			p.data.Release()
-		} else {
-			buffer = p.data
-		}
-		destination = p.destination
-		return
-	case <-c.ctx.Done():
-		return nil, M.Socksaddr{}, io.ErrClosedPipe
-	case <-c.readDeadline.Wait():
-		return nil, M.Socksaddr{}, os.ErrDeadlineExceeded
+	p, err := c.readPacket()
+	if err != nil {
+		return nil, M.Socksaddr{}, err
 	}
+	return c.readWaitOptions.Copy(p.data), p.destination, nil
 }

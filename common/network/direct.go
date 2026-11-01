@@ -30,7 +30,8 @@ func (o ReadWaitOptions) NeedHeadroom() bool {
 func (o ReadWaitOptions) Copy(buffer *buf.Buffer) *buf.Buffer {
 	if o.FrontHeadroom > buffer.Start() ||
 		o.RearHeadroom > buffer.FreeLen() {
-		newBuffer := o.newBuffer(buf.UDPBufferSize, false)
+		newBuffer := buf.NewSize(buffer.Len() + o.FrontHeadroom + o.RearHeadroom)
+		newBuffer.Resize(o.FrontHeadroom, 0)
 		newBuffer.Write(buffer.Bytes())
 		buffer.Release()
 		return newBuffer

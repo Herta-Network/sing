@@ -13,6 +13,9 @@ import (
 type Option[K comparable, V any] func(*LruCache[K, V])
 
 type HealthCheckCallback[K comparable, V any] func(K, V) bool
+
+// EvictCallback runs after the entry has been removed and the cache unlocked.
+// Calls from concurrent cache operations may overlap.
 type EvictCallback[K comparable, V any] func(key K, value V)
 
 func WithHealthCheck[K comparable, V any](cb HealthCheckCallback[K, V]) Option[K, V] {
@@ -93,13 +96,14 @@ func (c *LruCache[K, V]) LoadOrStore(key K, constructor func() V) (V, bool) {
 }
 
 func (c *LruCache[K, V]) LoadOrStoreEx(key K, constructor func() (V, bool)) (value V, loaded bool, ok bool) {
+	var evicted []eviction[K, V]
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer c.unlockAndNotify(&evicted)
 
 	le, ok := c.cache[key]
 	if ok {
 		if c.maxAge > 0 && le.Value.expires <= time.Now().Unix() || (c.onHealthCheck != nil && !c.onHealthCheck(key, le.Value.value)) {
-			c.deleteElement(le)
+			c.deleteElement(le, &evicted)
 			goto create
 		}
 
@@ -126,13 +130,14 @@ create:
 		c.cache[key] = c.lru.PushBack(e)
 	}
 
-	c.maybeDeleteOldest()
+	c.maybeDeleteOldest(&evicted)
 	return value, false, true
 }
 
 func (c *LruCache[K, V]) LoadOrStoreWithAge(key K, maxAge int64, constructor func() V) (V, bool) {
+	var evicted []eviction[K, V]
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer c.unlockAndNotify(&evicted)
 
 	if maxAge == 0 {
 		maxAge = c.maxAge
@@ -141,7 +146,7 @@ func (c *LruCache[K, V]) LoadOrStoreWithAge(key K, maxAge int64, constructor fun
 	le, ok := c.cache[key]
 	if ok {
 		if c.maxAge > 0 && le.Value.expires <= time.Now().Unix() || (c.onHealthCheck != nil && !c.onHealthCheck(key, le.Value.value)) {
-			c.deleteElement(le)
+			c.deleteElement(le, &evicted)
 			goto create
 		}
 
@@ -165,7 +170,7 @@ create:
 		c.cache[key] = c.lru.PushBack(e)
 	}
 
-	c.maybeDeleteOldest()
+	c.maybeDeleteOldest(&evicted)
 	return value, false
 }
 
@@ -195,8 +200,9 @@ func (c *LruCache[K, V]) Store(key K, value V) {
 }
 
 func (c *LruCache[K, V]) StoreWithExpire(key K, value V, expires time.Time) {
+	var evicted []eviction[K, V]
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer c.unlockAndNotify(&evicted)
 
 	if le, ok := c.cache[key]; ok {
 		c.lru.MoveToBack(le)
@@ -208,7 +214,7 @@ func (c *LruCache[K, V]) StoreWithExpire(key K, value V, expires time.Time) {
 		c.cache[key] = c.lru.PushBack(e)
 	}
 
-	c.maybeDeleteOldest()
+	c.maybeDeleteOldest(&evicted)
 }
 
 func (c *LruCache[K, V]) CloneTo(n *LruCache[K, V]) {
@@ -236,8 +242,9 @@ func (c *LruCache[K, V]) Range(block func(key K, value V)) {
 }
 
 func (c *LruCache[K, V]) get(key K) *entry[K, V] {
+	var evicted []eviction[K, V]
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer c.unlockAndNotify(&evicted)
 
 	le, ok := c.cache[key]
 	if !ok {
@@ -245,8 +252,8 @@ func (c *LruCache[K, V]) get(key K) *entry[K, V] {
 	}
 
 	if !c.staleReturn && c.maxAge > 0 && le.Value.expires <= time.Now().Unix() || (c.onHealthCheck != nil && !c.onHealthCheck(key, le.Value.value)) {
-		c.deleteElement(le)
-		c.maybeDeleteOldest()
+		c.deleteElement(le, &evicted)
+		c.maybeDeleteOldest(&evicted)
 
 		return nil
 	}
@@ -261,22 +268,36 @@ func (c *LruCache[K, V]) get(key K) *entry[K, V] {
 
 // Delete removes the value associated with a key.
 func (c *LruCache[K, V]) Delete(key K) {
+	var evicted []eviction[K, V]
 	c.mu.Lock()
+	defer c.unlockAndNotify(&evicted)
 
 	if le, ok := c.cache[key]; ok {
-		c.deleteElement(le)
+		c.deleteElement(le, &evicted)
 	}
+}
 
-	c.mu.Unlock()
+// DeleteFunc removes a key only if its current value matches the predicate.
+// The predicate runs under the cache lock and must not reenter the cache.
+func (c *LruCache[K, V]) DeleteFunc(key K, predicate func(V) bool) bool {
+	var evicted []eviction[K, V]
+	c.mu.Lock()
+	defer c.unlockAndNotify(&evicted)
+	if le, ok := c.cache[key]; ok && predicate(le.Value.value) {
+		c.deleteElement(le, &evicted)
+		return true
+	}
+	return false
 }
 
 func (c *LruCache[K, V]) Clear() {
+	var evicted []eviction[K, V]
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer c.unlockAndNotify(&evicted)
 
 	if c.onEvict != nil {
 		for le := c.lru.Front(); le != nil; le = le.Next() {
-			c.onEvict(le.Value.key, le.Value.value)
+			evicted = append(evicted, eviction[K, V]{le.Value.key, le.Value.value})
 		}
 	}
 
@@ -284,27 +305,39 @@ func (c *LruCache[K, V]) Clear() {
 	c.cache = make(map[K]*list.Element[*entry[K, V]])
 }
 
-func (c *LruCache[K, V]) maybeDeleteOldest() {
+func (c *LruCache[K, V]) maybeDeleteOldest(evicted *[]eviction[K, V]) {
 	if !c.staleReturn && c.maxAge > 0 {
 		now := time.Now().Unix()
 		for le := c.lru.Front(); le != nil && le.Value.expires <= now; le = c.lru.Front() {
-			c.deleteElement(le)
+			c.deleteElement(le, evicted)
 		}
 	}
 
 	if c.maxSize > 0 {
 		if n := c.lru.Len(); n > c.maxSize {
-			c.deleteElement(c.lru.Front())
+			c.deleteElement(c.lru.Front(), evicted)
 		}
 	}
 }
 
-func (c *LruCache[K, V]) deleteElement(le *list.Element[*entry[K, V]]) {
+func (c *LruCache[K, V]) deleteElement(le *list.Element[*entry[K, V]], evicted *[]eviction[K, V]) {
 	c.lru.Remove(le)
 	e := le.Value
 	delete(c.cache, e.key)
 	if c.onEvict != nil {
-		c.onEvict(e.key, e.value)
+		*evicted = append(*evicted, eviction[K, V]{e.key, e.value})
+	}
+}
+
+type eviction[K comparable, V any] struct {
+	key   K
+	value V
+}
+
+func (c *LruCache[K, V]) unlockAndNotify(evicted *[]eviction[K, V]) {
+	c.mu.Unlock()
+	for _, entry := range *evicted {
+		c.onEvict(entry.key, entry.value)
 	}
 }
 
