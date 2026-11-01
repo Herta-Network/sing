@@ -129,6 +129,15 @@ func (c *UnbindPacketConn) CreateConnectedPacketBatchWriter() (N.ConnectedPacket
 	return createSyscallConnectedPacketBatchWriter(c.ExtendedConn)
 }
 
+func (c *UnbindPacketConn) CreateConnectedPacketBatchWriterWithCount() (N.ConnectedPacketBatchWriterWithCount, bool) {
+	writer, created := createSyscallConnectedPacketBatchWriter(c.ExtendedConn)
+	if !created {
+		return nil, false
+	}
+	counted, ok := writer.(N.ConnectedPacketBatchWriterWithCount)
+	return counted, ok
+}
+
 func (c *UnbindPacketConn) Upstream() any {
 	return c.ExtendedConn
 }

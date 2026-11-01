@@ -236,3 +236,43 @@ func TestNativePacketBatchCountEmptyDatagram(t *testing.T) {
 		}
 	}
 }
+
+func TestNativePacketBatchRejectsStreamSockets(t *testing.T) {
+	input, _ := TCPPipe(t)
+	conn := NewUnbindPacketConn(input)
+	if _, ok := CreateConnectedPacketBatchWriter(conn); ok {
+		t.Fatal("TCP socket exposed as atomic packet batch writer")
+	}
+	if _, ok := CreateConnectedPacketBatchReadWaiter(conn); ok {
+		t.Fatal("TCP socket exposed as datagram batch reader")
+	}
+}
+
+func TestNativeConnectedPacketCountThroughUnbind(t *testing.T) {
+	peer, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	socket, err := net.DialUDP("udp4", nil, peer.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer socket.Close()
+	writer, ok := CreateConnectedPacketBatchWriterWithCount(NewUnbindPacketConn(socket))
+	if !ok {
+		t.Fatal("connected count capability lost")
+	}
+	n, err := writer.WriteConnectedPacketBatchCount(testBuffers("", "two"))
+	if err != nil || n != 2 {
+		t.Fatalf("n=%d error=%v", n, err)
+	}
+	peer.SetReadDeadline(time.Now().Add(time.Second))
+	for _, want := range []string{"", "two"} {
+		data := make([]byte, 16)
+		n, _, err := peer.ReadFrom(data)
+		if err != nil || string(data[:n]) != want {
+			t.Fatalf("got=%q err=%v", data[:n], err)
+		}
+	}
+}

@@ -85,7 +85,7 @@ measurement, or production deployment proof from these local checks.
 
 The optional `PacketBatchWriterWithCount` and connected equivalent preserve the
 old error-only APIs while returning a completed packet prefix on both success
-and failure. Native mmsg/msg_x writers retain progress across short sends,
+and failure. Native mmsg/msg_x writers require SOCK_DGRAM and retain progress across short sends,
 poll waits, timeouts and socket closure. Every input buffer is consumed,
 including unsent tails; the result does not authorize retrying freed buffers.
 
@@ -98,5 +98,6 @@ count as packets. CopyPacket uses scalar writes for opaque error-only batch
 writers instead of guessing partial progress.
 
 Regression coverage includes native partial-send/poll-error injection,
-zero-length datagrams, scalar fallback, NAT translation, counter prefixes,
+zero-length datagrams, connected-wrapper propagation, stream-socket rejection,
+scalar fallback, NAT translation, counter prefixes,
 every UoT frame boundary, lazy-header failures and once-only buffer release.
