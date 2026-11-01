@@ -23,9 +23,9 @@ func NewChunkReader(upstream io.Reader, maxChunkSize int) *ChunkReader {
 
 func (c *ChunkReader) ReadBuffer(buffer *buf.Buffer) error {
 	if c.cache != nil && !c.cache.IsEmpty() {
-        return common.Error(buffer.ReadFrom(c.cache))
-    }
-	
+		return common.Error(buffer.ReadFrom(c.cache))
+	}
+
 	if buffer.FreeLen() >= c.maxChunkSize {
 		return c.upstream.ReadBuffer(buffer)
 	}
@@ -94,6 +94,9 @@ type ChunkWriter struct {
 }
 
 func NewChunkWriter(writer io.Writer, maxChunkSize int) *ChunkWriter {
+	if maxChunkSize <= 0 {
+		panic("invalid maximum chunk size")
+	}
 	return &ChunkWriter{
 		upstream:     NewExtendedWriter(writer),
 		maxChunkSize: maxChunkSize,
@@ -114,6 +117,9 @@ func (w *ChunkWriter) Write(p []byte) (n int, err error) {
 		var writeN int
 		writeN, err = w.upstream.Write(data)
 		n += writeN
+		if err == nil && writeN != len(data) {
+			err = io.ErrShortWrite
+		}
 		if err != nil {
 			return
 		}
@@ -122,11 +128,24 @@ func (w *ChunkWriter) Write(p []byte) (n int, err error) {
 }
 
 func (w *ChunkWriter) WriteBuffer(buffer *buf.Buffer) error {
-	if buffer.Len() > w.maxChunkSize {
-		defer buffer.Release()
-		return common.Error(w.Write(buffer.Bytes()))
+	if buffer.Len() <= w.maxChunkSize {
+		return w.upstream.WriteBuffer(buffer)
 	}
-	return w.upstream.WriteBuffer(buffer)
+	options := N.NewReadWaitOptions(nil, w.upstream)
+	// Every earlier chunk needs independent framing space: an encrypting writer
+	// may change both head and tail, and an owned writer may retain the buffer.
+	// The final chunk can transfer the original allocation without copying.
+	for buffer.Len() > w.maxChunkSize {
+		chunk := options.NewBufferSize(w.maxChunkSize)
+		chunk.Write(buffer.To(w.maxChunkSize))
+		options.PostReturn(chunk)
+		buffer.Advance(w.maxChunkSize)
+		if err := w.upstream.WriteBuffer(chunk); err != nil {
+			buffer.Release()
+			return err
+		}
+	}
+	return w.upstream.WriteBuffer(options.Copy(buffer))
 }
 
 func (w *ChunkWriter) Upstream() any {

@@ -310,7 +310,13 @@ func (s *Serializer) readAddressWithScratch(reader io.Reader, scratch []byte) (S
 		if err != nil {
 			return Socksaddr{}, E.Cause(err, "read fqdn")
 		}
-		fqdnBytes := make([]byte, int(scratch[0]))
+		length := int(scratch[0])
+		var fqdnBytes []byte
+		if length <= len(scratch) {
+			fqdnBytes = scratch[:length]
+		} else {
+			fqdnBytes = make([]byte, length)
+		}
 		_, err = io.ReadFull(reader, fqdnBytes)
 		if err != nil {
 			return Socksaddr{}, E.Cause(err, "read fqdn")
