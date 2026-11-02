@@ -3,7 +3,6 @@ package bufio
 import (
 	"io"
 	"net"
-	"sync"
 
 	"github.com/metacubex/sing/common/buf"
 	N "github.com/metacubex/sing/common/network"
@@ -25,37 +24,17 @@ func NewVectorisedWriterWithCount(writer io.Writer) N.VectorisedWriterWithCount 
 }
 
 type countedNetVectorisedWriter struct {
-	writer  io.Writer
-	access  sync.Mutex
-	inline  [4][]byte
-	storage net.Buffers
-	vectors net.Buffers
+	writer io.Writer
 }
 
 func (w *countedNetVectorisedWriter) WriteVectorisedCount(buffers []*buf.Buffer) (int64, error) {
 	defer buf.ReleaseMulti(buffers)
 	total := int64(buf.LenMulti(buffers))
-	// A counted writer may be called concurrently just like its net.Conn.
-	// Serialize only its reusable descriptor storage and the associated write.
-	w.access.Lock()
-	defer w.access.Unlock()
-	if w.storage == nil {
-		w.storage = w.inline[:]
+	vectors := make(net.Buffers, len(buffers))
+	for i, b := range buffers {
+		vectors[i] = b.Bytes()
 	}
-	if len(buffers) > len(w.storage) {
-		w.storage = make(net.Buffers, len(buffers))
-	}
-	for i, buffer := range buffers {
-		w.storage[i] = buffer.Bytes()
-	}
-	w.vectors = w.storage[:len(buffers)]
-	n, err := w.vectors.WriteTo(w.writer)
-	// net.Buffers advances its slice and elements, including on partial writes.
-	// Clear the original span so no consumed payload remains reachable here.
-	for i := range buffers {
-		w.storage[i] = nil
-	}
-	w.vectors = nil
+	n, err := vectors.WriteTo(w.writer)
 	return checkVectorisedCount(n, total, err)
 }
 

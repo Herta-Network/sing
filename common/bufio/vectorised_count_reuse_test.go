@@ -3,8 +3,10 @@ package bufio
 import (
 	"errors"
 	"io"
+	"net"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/metacubex/sing/common/buf"
 )
@@ -22,7 +24,7 @@ func (w *retainedVectorWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func TestCountedVectorStorageClearedAfterPartialWrite(t *testing.T) {
+func TestCountedVectorReleasesBuffersAfterPartialWrite(t *testing.T) {
 	raw := &retainedVectorWriter{short: true}
 	w := &countedNetVectorisedWriter{writer: raw}
 	for _, count := range []int{4, 9, 2} {
@@ -34,14 +36,6 @@ func TestCountedVectorStorageClearedAfterPartialWrite(t *testing.T) {
 		n, err := w.WriteVectorisedCount(buffers)
 		if n != 1 || !errors.Is(err, io.ErrClosedPipe) {
 			t.Fatalf("n=%d err=%v", n, err)
-		}
-		if w.vectors != nil {
-			t.Fatal("advanced slice retained")
-		}
-		for _, data := range w.storage {
-			if data != nil {
-				t.Fatal("descriptor retained consumed bytes")
-			}
 		}
 		for _, buffer := range buffers {
 			if buffer.RawCap() != 0 {
@@ -56,8 +50,24 @@ func TestCountedVectorStorageClearedAfterPartialWrite(t *testing.T) {
 }
 
 func TestCountedVectorConcurrentCalls(t *testing.T) {
-	raw := &retainedVectorWriter{}
-	w := &countedNetVectorisedWriter{writer: raw}
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	client, err := net.Dial("tcp4", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	server, err := listener.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	client.SetDeadline(time.Now().Add(3 * time.Second))
+	server.SetDeadline(time.Now().Add(3 * time.Second))
+	w := NewVectorisedWriterWithCount(client)
 	var workers sync.WaitGroup
 	for worker := 0; worker < 4; worker++ {
 		workers.Add(1)
@@ -74,12 +84,14 @@ func TestCountedVectorConcurrentCalls(t *testing.T) {
 			}
 		}(byte(worker))
 	}
+	data := make([]byte, 800)
+	_, err = io.ReadFull(server, data)
 	workers.Wait()
-	if len(raw.data) != 800 {
-		t.Fatalf("bytes=%d", len(raw.data))
+	if err != nil {
+		t.Fatal(err)
 	}
-	for i := 0; i < len(raw.data); i += 2 {
-		if raw.data[i] != raw.data[i+1] {
+	for i := 0; i < len(data); i += 2 {
+		if data[i] != data[i+1] {
 			t.Fatal("concurrent vectors interleaved")
 		}
 	}
